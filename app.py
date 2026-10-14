@@ -2,7 +2,9 @@ from flask import Flask, render_template, jsonify, send_file, request
 import os
 import io
 import json
-import heapq
+import glob
+import tempfile
+import uuid
 from datetime import date, timedelta
 
 import numpy as np
@@ -40,7 +42,6 @@ LOAD_FLOOD_PRONE_LAYER = False
 EXCLUDE_OTHER_CROPS = True
 DISPLAY_SIMPLIFY_TOLERANCE = 0.0001  # WGS84 degrees; display only, analysis uses original geometry.
 MAX_FLOOD_DISPLAY_DIMENSION = 900   # simplify flood outline generation for browser display.
-MAX_AFFECTED_FEATURES = 500  # cap map geometry returned by /api/simulate; stats still use all fields.
 
 UTM_CRS = "EPSG:32647"
 WGS_CRS = "EPSG:4326"
@@ -78,6 +79,21 @@ dem_palette_cache = {}
 startup_warnings = []
 geojson_cache = {}
 excluded_crop_count = 0
+# Only the latest scenario is retained. Per-field scalar results are written as
+# JSON Lines to temporary storage so the simulation response does not include a
+# huge duplicate set of polygon geometries.
+scenario_registry = {}
+SCENARIO_CACHE_PREFIX = os.path.join(tempfile.gettempdir(), "flood_webgis_scenario_")
+
+
+def clear_scenario_cache():
+    """Remove older ephemeral scenario records from this worker."""
+    scenario_registry.clear()
+    for path in glob.glob(SCENARIO_CACHE_PREFIX + "*.jsonl"):
+        try:
+            os.remove(path)
+        except OSError as exc:
+            print(f"WARNING: could not remove old scenario cache {path}: {exc}")
 
 
 def clean_geometries(gdf):
@@ -118,7 +134,35 @@ def load_vector(filepath, label):
         return None
 
 
-def geojson_features(gdf, tolerance=DISPLAY_SIMPLIFY_TOLERANCE, fields_layer=False):
+def _display_text(value):
+    """Return a safe, non-empty string for popup metadata, or None."""
+    if value is None:
+        return None
+    try:
+        if bool(np.asarray(value).ndim == 0 and np.issubdtype(type(value), np.number) and np.isnan(value)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if not text or text.casefold() in {"nan", "none", "<na>", "null"}:
+        return None
+    return text
+
+
+def first_attribute(row, candidates):
+    """Find the first non-empty source attribute, ignoring column-name case."""
+    keys = {str(key).casefold(): key for key in row.index}
+    for candidate in candidates:
+        actual_key = keys.get(candidate.casefold())
+        if actual_key is not None:
+            value = _display_text(row.get(actual_key))
+            if value:
+                return value
+    return None
+
+
+def geojson_features(gdf, tolerance=DISPLAY_SIMPLIFY_TOLERANCE, fields_layer=False, layer_kind=None):
+    """Serialize one vector page to GeoJSON with stable popup-friendly attributes."""
     if gdf is None or gdf.empty:
         return []
     web = gdf.to_crs(WGS_CRS)
@@ -132,27 +176,97 @@ def geojson_features(gdf, tolerance=DISPLAY_SIMPLIFY_TOLERANCE, fields_layer=Fal
                 geom = geom.simplify(tolerance, preserve_topology=True)
             if geom.is_empty:
                 continue
-            props = {"name": str(row.get("name", f"Feature_{idx}"))}
+
             if fields_layer:
-                crop = str(row.get("Crop_type", "Other Crops"))
-                if crop not in CROP_TYPES:
-                    crop = "Other Crops"
-                # Use the area calculated in a projected CRS (m²), not WGS84 degrees.
-                props.update({
-                    "name": str(row.get("name", f"Field_{idx}")),
+                raw_crop = first_attribute(row, ["Crop_type", "crop_type", "CROP_TYPE"])
+                crop_lookup = {name.casefold(): name for name in CROP_TYPES}
+                crop = crop_lookup.get((raw_crop or "Other Crops").casefold(), "Other Crops")
+                raw_field_id = first_attribute(row, ["OBJECTID_1", "OBJECTID", "FID", "field_id", "id"])
+                field_id = raw_field_id or str(idx)
+                display_name = first_attribute(row, ["field_name_en", "FIELD_NAME", "NAME_EN", "NAME", "name"])
+                if not display_name:
+                    display_name = f"Agricultural field {field_id}"
+                area_m2 = float(row.get("area_m2", 0.0) or 0.0)
+                land_use_en = first_attribute(row, ["LU_DES_EN", "LANDUSE_EN", "LAND_USE_EN", "DES_EN", "TYPE_EN"])
+                land_use_th = first_attribute(row, ["LU_DES_TH", "LANDUSE_TH", "LAND_USE_TH", "DES_TH"])
+                land_use_code = first_attribute(row, ["LU_CODE", "LULC_CODE", "LANDUSE_CODE"])
+                props = {
+                    "name": display_name,
+                    "display_name": display_name,
+                    "field_id": field_id,
                     "Crop_type": crop,
-                    "area_m2": float(row.get("area_m2", 0.0)),
-                    "color": COLORS.get(crop, "#999999"),
-                    "field_id": str(idx)
-                })
-            elif "name" in gdf.columns:
-                props["name"] = str(row["name"])
+                    "crop_type": crop,
+                    "crop_type_en": crop,
+                    "land_use_en": land_use_en,
+                    "land_use_th": land_use_th,
+                    "land_use_code": land_use_code,
+                    "area_m2": area_m2,
+                    "area_ha": area_m2 / 10000.0,
+                    "area_rai": area_m2 / 1600.0,
+                    "color": COLORS.get(crop, "#999999")
+                }
+            else:
+                if layer_kind == "boundary":
+                    display_name = first_attribute(row, [
+                        "PROVINCE_EN", "PROV_EN", "NAME_EN", "NAME_ENG", "ADM1_EN", "NAME_1"
+                    ]) or "Nakhon Sawan"
+                    props = {"name": display_name, "display_name": display_name, "feature_type": "province"}
+                    props["province_name"] = display_name
+                elif layer_kind == "waterways":
+                    # Prefer explicitly English-labelled name fields. Generic name fields
+                    # are only used if they do not appear to contain Thai text.
+                    display_name = first_attribute(row, [
+                        "WATERWAY_NAME_EN", "WATER_NAME_EN", "RIVER_NAME_EN", "CANAL_NAME_EN",
+                        "NAME_EN", "NAME_ENG", "NAME_E", "ENG_NAME", "ENGNAME", "WTR_NAME_EN"
+                    ])
+                    if not display_name:
+                        generic_name = first_attribute(row, [
+                            "WATERWAY_NAME", "WTR_NAME", "WATER_NAME", "RIVER_NAME",
+                            "CANAL_NAME", "WATERBODY", "NAME", "name"
+                        ])
+                        if generic_name and not any("\u0e00" <= char <= "\u0e7f" for char in generic_name):
+                            display_name = generic_name
+                    description_en = first_attribute(row, [
+                        "LU_DES_EN", "DESCRIPTION_EN", "DES_EN", "TYPE_EN", "CLASS_EN",
+                        "WATERWAY_TYPE_EN", "WATERWAY_TYPE", "TYPE", "LU_DES"
+                    ])
+                    if not display_name:
+                        display_name = description_en or f"Waterway polygon {idx}"
+                    props = {
+                        "name": display_name,
+                        "display_name": display_name,
+                        "feature_type": "waterway",
+                        "description_en": description_en
+                    }
+                elif layer_kind == "flood_prone":
+                    display_name = first_attribute(row, [
+                        "NAME_EN", "NAME_ENG", "ENG_NAME", "NAME", "name", "LU_DES_EN", "TYPE_EN"
+                    ]) or f"Flood-prone area {idx}"
+                    props = {"name": display_name, "display_name": display_name, "feature_type": "flood-prone area"}
+                elif layer_kind == "roads":
+                    display_name = first_attribute(row, [
+                        "ROAD_NAME_EN", "ROAD_NAME", "NAME_EN", "NAME_ENG", "NAME", "name", "ROAD_TYPE_EN", "TYPE_EN"
+                    ]) or f"Road feature {idx}"
+                    props = {"name": display_name, "display_name": display_name, "feature_type": "road"}
+                else:
+                    display_name = first_attribute(row, ["NAME_EN", "NAME_ENG", "NAME", "name"]) or f"Feature {idx}"
+                    props = {"name": display_name, "display_name": display_name}
+
+            # Include selected English/Thai classification attributes for water features too.
+            if not fields_layer and layer_kind in {"waterways", "flood_prone", "roads"}:
+                description_th = first_attribute(row, ["LU_DES_TH", "DESCRIPTION_TH", "DES_TH", "TYPE_TH"])
+                code_value = first_attribute(row, ["LU_CODE", "TYPE_CODE", "CLASS_CODE"])
+                if description_th:
+                    props["description_th"] = description_th
+                if code_value:
+                    props["feature_code"] = code_value
+
             feature = {"type": "Feature", "geometry": mapping(geom), "properties": props}
             json.dumps(feature, allow_nan=False)
             output.append(feature)
         except (ValueError, TypeError, OverflowError) as exc:
             print(f"Skipping feature {idx}: {exc}")
-    print(f"Converted {len(output)} features to GeoJSON.")
+    print(f"Converted {len(output)} {layer_kind or ('field' if fields_layer else 'vector')} features to GeoJSON.")
     return output
 
 
@@ -342,19 +456,38 @@ def get_layers():
     # Cache serialized features in memory so repeat page loads do not re-convert shapefiles.
     if "layers" not in geojson_cache:
         geojson_cache["layers"] = {
-            "boundary": geojson_features(datasets.get("boundary")),
-            "flood_prone": geojson_features(datasets.get("flood_prone")),
-            "waterways": geojson_features(datasets.get("waterways")),
-            "roads": geojson_features(datasets.get("roads"))
+            "boundary": geojson_features(datasets.get("boundary"), layer_kind="boundary"),
+            "flood_prone": geojson_features(datasets.get("flood_prone"), layer_kind="flood_prone"),
+            "waterways": geojson_features(datasets.get("waterways"), layer_kind="waterways"),
+            "roads": geojson_features(datasets.get("roads"), layer_kind="roads")
         }
     return jsonify(geojson_cache["layers"])
 
 
 @app.route("/api/fields")
 def get_fields():
-    if "fields" not in geojson_cache:
-        geojson_cache["fields"] = geojson_features(fields_utm, fields_layer=True)
-    return jsonify(geojson_cache["fields"])
+    """Return agricultural field polygons in small pages to avoid oversized JSON responses."""
+    if fields_utm is None:
+        return jsonify({"error": f"Crop fields are unavailable. Check {os.path.basename(SHAPEFILE)} and its sidecar files."}), 503
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+        limit = int(request.args.get("limit", 250))
+    except (TypeError, ValueError):
+        return jsonify({"error": "offset and limit must be integers"}), 400
+    limit = min(max(limit, 50), 500)
+    total = int(len(fields_utm))
+    end = min(offset + limit, total)
+    if offset >= total:
+        return jsonify({"features": [], "offset": offset, "limit": limit, "total": total, "done": True})
+    page = fields_utm.iloc[offset:end]
+    features = geojson_features(page, fields_layer=True)
+    return jsonify({
+        "features": features,
+        "offset": offset,
+        "limit": limit,
+        "total": total,
+        "done": end >= total
+    })
 
 
 @app.route("/api/dem")
@@ -675,100 +808,105 @@ def simulate_flood(payload):
     stats = {crop: {"area_total_rai": 0.0, "area_affected_rai": 0.0,
                     "value_at_risk_baht": 0.0, "loss_baht": 0.0,
                     "fields_affected": 0} for crop in CROP_TYPES}
-    # Keep only the 500 largest affected fields for display. Calculate totals for
-    # all fields; store only scalar properties until the final response is built.
-    field_candidates = []
     connected_note = ""
 
-    for code, idx in row_by_code.items():
-        total_pixels = int(total_counts[code])
-        if total_pixels <= 0:
-            continue
-        field_row = fields_utm.loc[idx]
-        crop = str(field_row.get("Crop_type", "Other Crops"))
-        if crop not in CROP_TYPES:
-            crop = "Other Crops"
-        total_area_m2 = float(field_row.get("area_m2", 0.0))
-        total_area_rai = total_area_m2 / 1600.0
-        stats[crop]["area_total_rai"] += total_area_rai
+    # Keep detailed per-field results on temporary disk. The browser already has
+    # agricultural polygon geometries from paginated /api/fields, so the simulation
+    # returns attributes only and never duplicates up to hundreds of polygons.
+    clear_scenario_cache()
+    scenario_id = uuid.uuid4().hex
+    metrics_path = SCENARIO_CACHE_PREFIX + scenario_id + ".jsonl"
+    metrics_offsets = []
+    metrics_fp = open(metrics_path, "w", encoding="utf-8")
+    try:
+        for code, idx in row_by_code.items():
+            total_pixels = int(total_counts[code])
+            if total_pixels <= 0:
+                continue
+            field_row = fields_utm.loc[idx]
+            crop = str(field_row.get("Crop_type", "Other Crops"))
+            if crop not in CROP_TYPES:
+                crop = "Other Crops"
+            total_area_m2 = float(field_row.get("area_m2", 0.0))
+            total_area_rai = total_area_m2 / 1600.0
+            stats[crop]["area_total_rai"] += total_area_rai
 
-        flood_pixels = int(flooded_counts[code])
-        if flood_pixels <= 0:
-            continue
-        fraction = min(1.0, flood_pixels / total_pixels)
-        affected_area_rai = total_area_rai * fraction
-        mean_depth = float(depth_sum[code] / flood_pixels) if flood_pixels else 0.0
-        params = get_crop_parameters(payload, crop)
-        shift = int(planting_shifts.get(crop, 0))
-        if shift < -730 or shift > 730:
-            raise ValueError("Planting shift must be between -730 and 730 days")
-        planting_date = scenario_date + timedelta(days=shift)
-        crop_age = (flood_date - planting_date).days
-        crop_present = 0 <= crop_age <= params["duration_days"]
+            flood_pixels = int(flooded_counts[code])
+            if flood_pixels <= 0:
+                continue
+            fraction = min(1.0, flood_pixels / total_pixels)
+            affected_area_rai = total_area_rai * fraction
+            mean_depth = float(depth_sum[code] / flood_pixels) if flood_pixels else 0.0
+            params = get_crop_parameters(payload, crop)
+            shift = int(planting_shifts.get(crop, 0))
+            if shift < -730 or shift > 730:
+                raise ValueError("Planting shift must be between -730 and 730 days")
+            planting_date = scenario_date + timedelta(days=shift)
+            crop_age = (flood_date - planting_date).days
+            crop_present = 0 <= crop_age <= params["duration_days"]
 
-        # The stated paper equation is implemented as:
-        # Damage = H(kg/ha) * P(THB/kg) * sum_i[a_i(ha) * f_i(h_i,d_i)].
-        # Pixel areas are scaled so the valid raster cells sum to the field's measured area.
-        # damage_factor is the crop-specific maximum fragility multiplier phi_c (0–1).
-        pixel_area_ha = (total_area_m2 / 10000.0) / total_pixels
-        exposed_area_ha = pixel_area_ha * flood_pixels
-        if crop_present:
-            weighted_fragility_area_ha = (
-                pixel_area_ha * params["damage_factor"] * fragility_basis_sum[code]
-            )
-            value_at_risk = exposed_area_ha * params["yield_kg_ha"] * params["price_baht_kg"]
-            estimated_loss = (
-                params["yield_kg_ha"] * params["price_baht_kg"] * weighted_fragility_area_ha
-            )
-            vulnerability = estimated_loss / value_at_risk if value_at_risk > 0 else 0.0
-        else:
-            weighted_fragility_area_ha = 0.0
-            value_at_risk = 0.0
-            estimated_loss = 0.0
-            vulnerability = 0.0
-        stats[crop]["area_affected_rai"] += affected_area_rai
-        stats[crop]["value_at_risk_baht"] += value_at_risk
-        stats[crop]["loss_baht"] += estimated_loss
-        stats[crop]["fields_affected"] += 1
+            # Damage = H(kg/ha) * P(THB/kg) * sum_i[a_i(ha) * f_i(h_i,d_i)].
+            # Pixel area is scaled so valid raster cells sum to the field's measured area.
+            pixel_area_ha = (total_area_m2 / 10000.0) / total_pixels
+            exposed_area_ha = pixel_area_ha * flood_pixels
+            if crop_present:
+                weighted_fragility_area_ha = (
+                    pixel_area_ha * params["damage_factor"] * fragility_basis_sum[code]
+                )
+                value_at_risk = exposed_area_ha * params["yield_kg_ha"] * params["price_baht_kg"]
+                estimated_loss = (
+                    params["yield_kg_ha"] * params["price_baht_kg"] * weighted_fragility_area_ha
+                )
+                vulnerability = estimated_loss / value_at_risk if value_at_risk > 0 else 0.0
+            else:
+                weighted_fragility_area_ha = 0.0
+                value_at_risk = 0.0
+                estimated_loss = 0.0
+                vulnerability = 0.0
 
-        feature_properties = {
-            "name": str(fields_web.loc[idx].get("name", f"Field_{idx}")),
-            "Crop_type": crop,
-            "area_rai": round(total_area_rai, 3),
-            "affected_area_rai": round(affected_area_rai, 3),
-            "flood_fraction": round(fraction, 4),
-            "mean_flood_depth_m": round(mean_depth, 2),
-            "flood_duration_days": flood_duration_days,
-            "crop_age_at_flood_days": crop_age,
-            "crop_present_at_flood": bool(crop_present),
-            "weighted_fragility_area_ha": round(weighted_fragility_area_ha, 5),
-            "vulnerability": round(vulnerability, 3),
-            "value_at_risk_baht": round(value_at_risk, 2),
-            "loss_baht": round(estimated_loss, 2)
-        }
-        candidate = (float(affected_area_rai), int(code), idx, feature_properties)
-        if len(field_candidates) < MAX_AFFECTED_FEATURES:
-            heapq.heappush(field_candidates, candidate)
-        elif candidate[:2] > field_candidates[0][:2]:
-            heapq.heapreplace(field_candidates, candidate)
+            stats[crop]["area_affected_rai"] += affected_area_rai
+            stats[crop]["value_at_risk_baht"] += value_at_risk
+            stats[crop]["loss_baht"] += estimated_loss
+            stats[crop]["fields_affected"] += 1
 
-    # Only simplify/serialize geometries for selected display features. Totals above
-    # still include every affected field, not just the displayed 500 polygons.
-    affected_features = []
-    for _, _, idx, props in sorted(field_candidates, key=lambda item: (item[0], item[1]), reverse=True):
-        web_geom = fields_web.loc[idx].geometry
-        if web_geom is None or web_geom.is_empty:
-            continue
-        display_geom = web_geom.simplify(
-            DISPLAY_SIMPLIFY_TOLERANCE, preserve_topology=True
-        )
-        if display_geom.is_empty:
-            continue
-        affected_features.append({
-            "type": "Feature",
-            "geometry": mapping(display_geom),
-            "properties": props
-        })
+            source_row = fields_utm.loc[idx]
+            field_id = first_attribute(source_row, ["OBJECTID_1", "OBJECTID", "FID", "field_id", "id"]) or str(idx)
+            display_name = first_attribute(source_row, ["field_name_en", "FIELD_NAME", "NAME_EN", "NAME", "name"]) or f"Agricultural field {field_id}"
+            feature_properties = {
+                "name": display_name,
+                "display_name": display_name,
+                "field_id": field_id,
+                "Crop_type": crop,
+                "crop_type": crop,
+                "crop_type_en": crop,
+                "land_use_en": first_attribute(source_row, ["LU_DES_EN", "LANDUSE_EN", "LAND_USE_EN", "DES_EN", "TYPE_EN"]),
+                "land_use_th": first_attribute(source_row, ["LU_DES_TH", "LANDUSE_TH", "LAND_USE_TH", "DES_TH"]),
+                "land_use_code": first_attribute(source_row, ["LU_CODE", "LULC_CODE", "LANDUSE_CODE"]),
+                "area_m2": round(total_area_m2, 3),
+                "area_rai": round(total_area_rai, 3),
+                "area_ha": round(total_area_m2 / 10000.0, 5),
+                "affected_area_rai": round(affected_area_rai, 3),
+                "flood_fraction": round(fraction, 4),
+                "mean_flood_depth_m": round(mean_depth, 2),
+                "flood_duration_days": flood_duration_days,
+                "crop_age_at_flood_days": crop_age,
+                "crop_present_at_flood": bool(crop_present),
+                "weighted_fragility_area_ha": round(weighted_fragility_area_ha, 5),
+                "vulnerability": round(vulnerability, 3),
+                "value_at_risk_baht": round(value_at_risk, 2),
+                "loss_baht": round(estimated_loss, 2)
+            }
+            record = {"field_id": str(field_id), "properties": feature_properties}
+            metrics_offsets.append(metrics_fp.tell())
+            metrics_fp.write(json.dumps(record, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n")
+    finally:
+        metrics_fp.close()
+
+    scenario_registry[scenario_id] = {
+        "path": metrics_path,
+        "offsets": metrics_offsets,
+        "total": len(metrics_offsets)
+    }
 
     for crop_stats in stats.values():
         for key in ("area_total_rai", "area_affected_rai", "value_at_risk_baht", "loss_baht"):
@@ -777,7 +915,10 @@ def simulate_flood(payload):
     if connected_only and datasets.get("waterways") is not None:
         connected_note = "Connectivity was requested; if no suitable waterway seed cells existed, the model fell back to the elevation-threshold mask."
     return {
-        "fields": affected_features,
+        # All crop polygon geometries already exist in the paginated Crop fields layer.
+        # Keep this key for compatibility, but avoid resending duplicate geometry.
+        "fields": [],
+        "scenario_id": scenario_id,
         "stats": stats,
         "summary": {
             "river_level": water_level,
@@ -793,12 +934,45 @@ def simulate_flood(payload):
             "total_value_at_risk_baht": round(sum(s["value_at_risk_baht"] for s in stats.values()), 2),
             "flooded_pixel_count": flooded_pixel_count,
             "affected_fields_total": int(sum(v["fields_affected"] for v in stats.values())),
-            "affected_field_features_returned": len(affected_features),
-            "affected_field_features_limit": MAX_AFFECTED_FEATURES,
-            "model_note": "Simple DEM elevation-threshold screening model; damage uses a provisional depth-duration fragility function and is not a calibrated hydraulic/agricultural forecast. Statistics include all affected fields; the map displays up to 500 affected polygons, prioritised by affected area.",
+            "affected_fields_metrics_available": len(metrics_offsets),
+            "model_note": "Simple DEM elevation-threshold screening model; damage uses a provisional depth-duration fragility function and is not a calibrated hydraulic/agricultural forecast. Statistics include all affected fields; the browser highlights affected polygons in the preloaded agricultural field layer.",
             "connectivity_note": connected_note
         }
     }
+
+
+@app.route("/api/scenario/<scenario_id>/fields")
+def get_scenario_fields(scenario_id):
+    """Return affected-field popup attributes in pages without polygon geometry."""
+    scenario = scenario_registry.get(scenario_id)
+    if scenario is None or not os.path.exists(scenario.get("path", "")):
+        return jsonify({"error": "Scenario results expired or are unavailable. Run the scenario again."}), 404
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+        limit = int(request.args.get("limit", 250))
+    except (TypeError, ValueError):
+        return jsonify({"error": "offset and limit must be integers"}), 400
+    limit = min(max(limit, 50), 500)
+    total = int(scenario["total"])
+    end = min(offset + limit, total)
+    records = []
+    try:
+        with open(scenario["path"], "r", encoding="utf-8") as handle:
+            for position in range(offset, end):
+                handle.seek(scenario["offsets"][position])
+                line = handle.readline()
+                if line:
+                    records.append(json.loads(line))
+    except (OSError, ValueError, IndexError) as exc:
+        app.logger.exception("Could not read paginated scenario field metrics")
+        return jsonify({"error": f"Could not read scenario field results: {exc}"}), 500
+    return jsonify({
+        "features": records,
+        "offset": offset,
+        "limit": limit,
+        "total": total,
+        "done": end >= total
+    })
 
 
 @app.route("/api/simulate", methods=["POST"])

@@ -176,7 +176,7 @@ td:first-child,th:first-child{text-align:left}
     <h2>Map appearance</h2>
     <div class="card">
       <strong style="font-size:12px">Change layer colours</strong>
-      <div class="sub" style="margin:5px 0 9px">Colour changes apply immediately to visible map layers for this browser session.</div>
+      <div class="sub" style="margin:5px 0 9px">Colour changes apply immediately to visible map layers for this browser session. Agricultural fields are shown at startup; after a scenario, flooded fields are highlighted using the Affected fields colour.</div>
       <div class="map-style-grid">
         <label class="map-style-item"><span>Province boundary</span><input id="colorBoundary" type="color" value="#e53935"></label>
         <label class="map-style-item"><span>Flood-prone areas</span><input id="colorFloodProne" type="color" value="#1769ff"></label>
@@ -273,9 +273,8 @@ const layerPanes = {
   'Affected crop fields':'pane-affected-crops'
 };
 const defaultLayerOrder = [
-  'Province boundary', 'Affected crop fields', 'Crop fields',
-  'Simulated flood extent', 'Roads', 'Waterways',
-  'Flood-prone areas', 'DEM elevation image'
+  'Province boundary', 'Crop fields', 'Simulated flood extent',
+  'Roads', 'Waterways', 'Flood-prone areas', 'DEM elevation image'
 ];
 let layerDrawOrder = defaultLayerOrder.slice();
 Object.values(layerPanes).forEach(paneName => {
@@ -493,6 +492,8 @@ window.setTimeout(positionCalculatorToggle, 200);
 let currentFloodLayer = null;
 let currentAffectedLayer = null;
 let demLayer = null;
+let cropFieldsLayer = null;
+const cropFeatureLayersById = new Map();
 
 const money = n => Number(n || 0).toLocaleString('en-GB',{maximumFractionDigits:0});
 const number = n => Number(n || 0).toLocaleString('en-GB',{maximumFractionDigits:2});
@@ -508,8 +509,14 @@ async function getJSON(url) {
 }
 async function postJSON(url, body) {
   const response = await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  const raw = await response.text();
+  let result = null;
+  try { result = raw ? JSON.parse(raw) : null; } catch (_) {
+    const preview = raw ? raw.slice(0, 160).replace(/\s+/g, ' ') : '(empty response)';
+    throw new Error(`${url} returned a non-JSON response (HTTP ${response.status}). ${preview}`);
+  }
+  if (!response.ok) throw new Error((result && result.error) || `${url} returned HTTP ${response.status}`);
+  if (result === null) throw new Error(`${url} returned an empty response (HTTP ${response.status}).`);
   return result;
 }
 function addOverlay(name, layer, addToMap=true) {
@@ -533,30 +540,150 @@ function refreshMapStyles() {
   if (overlayLayers['Flood-prone areas']) overlayLayers['Flood-prone areas'].setStyle({color:mapColors.floodProne,fillColor:mapColors.floodProne,weight:1.5,fillOpacity:0.20});
   if (overlayLayers['Waterways']) overlayLayers['Waterways'].setStyle({color:mapColors.waterways,weight:2,fillOpacity:0.12});
   if (overlayLayers['Roads']) overlayLayers['Roads'].setStyle({color:mapColors.roads,weight:1.2,fillOpacity:0});
-  setGeoJsonStyle(overlayLayers['Crop fields'], feature => ({color:'#ffffff',weight:0.6,fillColor:mapColors.crops[(feature.properties||{}).crop_type]||'#999999',fillOpacity:0.58}));
+  setGeoJsonStyle(overlayLayers['Crop fields'], cropFieldStyle);
   if (currentFloodLayer) currentFloodLayer.setStyle({color:mapColors.simulatedFlood,weight:1.5,fillColor:mapColors.simulatedFlood,fillOpacity:0.34});
   if (currentAffectedLayer) currentAffectedLayer.setStyle({color:mapColors.affectedFields,weight:1.5,fillColor:mapColors.affectedFields,fillOpacity:0.68});
 }
-function featurePopup(feature, layer) {
-  const p=feature.properties||{};
-  let html=`<b>${p.name || 'Feature'}</b>`;
-  if (p.crop_type) html+=`<br>Crop: ${p.crop_type}`;
-  if (p.area_m2!=null) html+=`<br>Area: ${number(Number(p.area_m2)/10000)} ha`;
-  if (p.affected_area_rai!=null) {
-    html+=`<br>Affected area: ${number(p.affected_area_rai)} rai`;
-    html+=`<br>Mean flood depth: ${number(p.mean_flood_depth_m)} m`;
-    if(p.flood_duration_days!=null) html+=`<br>Assumed flood duration: ${number(p.flood_duration_days)} days`;
-    html+=`<br>Value at risk: ฿${money(p.value_at_risk_baht)}`;
-    html+=`<br>Estimated loss: ฿${money(p.loss_baht)}`;
-  }
-  layer.bindPopup(html);
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[ch]));
 }
+function buildFeaturePopupHtml(feature) {
+  const p = (feature && feature.properties) || {};
+  const name = p.display_name || p.name || 'Feature';
+  const crop = p.crop_type || p.Crop_type || p.crop_type_en || '';
+  const rows = [];
+  const addRow = (label, value) => {
+    if (value === null || value === undefined || value === '') return;
+    rows.push(`<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`);
+  };
+
+  rows.push(`<div style="font-size:14px;margin-bottom:5px"><strong>${escapeHtml(name)}</strong></div>`);
+  if (p.feature_type === 'province' || p.province_name) {
+    addRow('Province', p.province_name || name);
+  }
+  if (p.feature_type === 'waterway') {
+    addRow('Waterway name (English)', name);
+    addRow('Description (English)', p.description_en);
+    addRow('Description (Thai)', p.description_th);
+    addRow('Feature code', p.feature_code);
+  }
+  if (p.feature_type === 'road' || p.feature_type === 'flood-prone area') {
+    addRow('Description (English)', p.description_en);
+    addRow('Description (Thai)', p.description_th);
+    addRow('Feature code', p.feature_code);
+  }
+  if (p.field_id !== undefined) addRow('Field ID', p.field_id);
+  if (crop) addRow('Crop type', crop);
+  addRow('Land use (English)', p.land_use_en);
+  addRow('Land use (Thai)', p.land_use_th);
+  addRow('Land-use code', p.land_use_code);
+
+  if (p.affected_area_rai !== undefined && p.affected_area_rai !== null) {
+    addRow('Total field area', `${number(p.area_rai)} rai (${number(Number(p.area_rai || 0) * 0.16)} ha)`);
+    addRow('Flood-affected area', `${number(p.affected_area_rai)} rai (${number(Number(p.affected_area_rai || 0) * 0.16)} ha)`);
+    if (p.flood_fraction !== undefined) addRow('Share of field flooded', `${number(Number(p.flood_fraction) * 100)}%`);
+    addRow('Mean flood depth', `${number(p.mean_flood_depth_m)} m`);
+    if (p.flood_duration_days !== undefined) addRow('Assumed flood duration', `${number(p.flood_duration_days)} days`);
+    if (p.crop_age_at_flood_days !== undefined) addRow('Crop age at flood', `${number(p.crop_age_at_flood_days)} days`);
+    if (p.crop_present_at_flood !== undefined) addRow('Crop present on flood date', p.crop_present_at_flood ? 'Yes' : 'No');
+    addRow('Value at risk', `฿${money(p.value_at_risk_baht)}`);
+    addRow('Estimated crop loss', `฿${money(p.loss_baht)}`);
+  } else if (p.area_rai !== undefined) {
+    addRow('Field area', `${number(p.area_rai)} rai (${number(Number(p.area_rai || 0) * 0.16)} ha)`);
+  } else if (p.area_m2 !== undefined) {
+    addRow('Area', `${number(Number(p.area_m2) / 1600)} rai (${number(Number(p.area_m2) / 10000)} ha)`);
+  }
+
+  if (p.is_flood_affected) {
+    rows.unshift('<div style="font-weight:700;color:#b3261e;margin-bottom:4px">Flood-affected agricultural field</div>');
+  }
+  return `<div class="feature-popup">${rows.join('')}</div>`;
+}
+function featurePopup(feature, layer) {
+  // Resolve properties when the popup opens so scenario metrics added later are included.
+  layer.bindPopup(() => buildFeaturePopupHtml(layer.feature || feature), {maxWidth:300});
+}
+function cropFieldStyle(feature) {
+  const p = (feature && feature.properties) || {};
+  if (p.is_flood_affected) {
+    return {color:'#a61b1b', weight:1.2, fillColor:mapColors.affectedFields, fillOpacity:0.76};
+  }
+  const crop = p.crop_type || p.Crop_type || p.crop_type_en || 'Other Crops';
+  return {
+    color: '#ffffff',
+    weight: 0.55,
+    fillColor: mapColors.crops[crop] || '#999999',
+    fillOpacity: 0.48
+  };
+}
+function clearFieldImpactProperties() {
+  const metricKeys = [
+    'affected_area_rai','flood_fraction','mean_flood_depth_m','flood_duration_days',
+    'crop_age_at_flood_days','crop_present_at_flood','weighted_fragility_area_ha',
+    'vulnerability','value_at_risk_baht','loss_baht'
+  ];
+  cropFeatureLayersById.forEach(layer => {
+    const props = layer.feature && layer.feature.properties;
+    if (!props) return;
+    metricKeys.forEach(key => { delete props[key]; });
+    props.is_flood_affected = false;
+    if (typeof layer.setStyle === 'function') layer.setStyle(cropFieldStyle(layer.feature));
+  });
+}
+async function loadScenarioFieldMetrics(scenarioId) {
+  clearFieldImpactProperties();
+  let offset = 0;
+  let total = null;
+  const pageSize = 250;
+  while (total === null || offset < total) {
+    const page = await getJSON(`/api/scenario/${encodeURIComponent(scenarioId)}/fields?offset=${offset}&limit=${pageSize}`);
+    if (!page || !Array.isArray(page.features)) {
+      throw new Error('The scenario field-metrics endpoint returned an invalid response.');
+    }
+    total = Number(page.total || 0);
+    for (const record of page.features) {
+      const fieldId = String(record.field_id ?? (record.properties || {}).field_id ?? '');
+      const layer = cropFeatureLayersById.get(fieldId);
+      if (!layer || !layer.feature) continue;
+      Object.assign(layer.feature.properties, record.properties || {}, {is_flood_affected:true});
+      if (typeof layer.setStyle === 'function') layer.setStyle(cropFieldStyle(layer.feature));
+    }
+    offset = Number(page.offset || offset) + page.features.length;
+    setStatus(`Applying flood results to agricultural fields: ${number(offset)} / ${number(total)} affected fields…`, 'normal');
+    if (page.done || page.features.length === 0) break;
+  }
+  refreshMapStyles();
+  return total || 0;
+}
+
 function staticLayer(name, features, style) {
   if (!features || !features.length) return null;
   const layer=L.geoJSON(features,{pane:paneForLayer(name),style,onEachFeature:featurePopup});
   addOverlay(name,layer,true);
   return layer;
 }
+
+async function loadAgriculturalFields(layer, expectedTotal=0) {
+  const pageSize = 250; // Small responses reduce 502/JSON parsing risk on Render Free.
+  let offset = 0;
+  let total = Number(expectedTotal) || null;
+  while (total === null || offset < total) {
+    const page = await getJSON(`/api/fields?offset=${offset}&limit=${pageSize}`);
+    if (!page || !Array.isArray(page.features)) {
+      throw new Error('The /api/fields endpoint did not return a paginated GeoJSON feature list.');
+    }
+    if (Number.isFinite(Number(page.total))) total = Number(page.total);
+    if (page.features.length) layer.addData(page.features);
+    offset = Number(page.offset || offset) + page.features.length;
+    const countLabel = total === null ? String(offset) : `${number(offset)} / ${number(total)}`;
+    setStatus(`Loading agricultural field polygons: ${countLabel}…`, 'normal');
+    if (page.done || page.features.length === 0) break;
+  }
+  return {loaded: offset, total: total || offset};
+}
+
 async function loadMap() {
   const health=await getJSON('/api/health');
   const data=await getJSON('/api/layers');
@@ -567,6 +694,21 @@ async function loadMap() {
   x=staticLayer('Flood-prone areas',data.flood_prone,{color:mapColors.floodProne,weight:1.5,fillColor:mapColors.floodProne,fillOpacity:0.20});
   x=staticLayer('Waterways',data.waterways,{color:mapColors.waterways,weight:2,fillOpacity:0.12});
   x=staticLayer('Roads',data.roads,{color:mapColors.roads,weight:1.2,fillOpacity:0});
+
+  // Show the agricultural field overlay by default. Load the polygons in small
+  // pages so the browser and Render do not need one enormous GeoJSON response.
+  cropFieldsLayer = L.geoJSON([], {
+    pane: paneForLayer('Crop fields'),
+    style: cropFieldStyle,
+    onEachFeature: (feature, layer) => {
+      featurePopup(feature, layer);
+      const fieldId = (feature.properties || {}).field_id;
+      if (fieldId !== undefined && fieldId !== null) {
+        cropFeatureLayersById.set(String(fieldId), layer);
+      }
+    }
+  });
+  addOverlay('Crop fields', cropFieldsLayer, true);
   const info=await getJSON('/api/dem-info').catch(()=>({available:false}));
   if(info.available && info.bounds) {
     demLayer=L.imageOverlay('/api/dem?palette='+encodeURIComponent($('demPalette').value),info.bounds,{pane:paneForLayer('DEM elevation image'),opacity:Number($('demOpacity').value)/100,interactive:false});
@@ -595,10 +737,12 @@ async function loadMap() {
     // Boundary data is optional; use a conservative provincial-scale fallback.
     map.setView([15.70,100.13],9);
   }
+  const fieldLoad = await loadAgriculturalFields(cropFieldsLayer, health.fields_count || 0);
+  console.info(`Loaded ${fieldLoad.loaded} agricultural field polygons (source count ${fieldLoad.total}).`);
   if(health.warnings && health.warnings.length) {
-    setStatus(`Loaded ${health.fields_count} retained field features; excluded ${health.excluded_crop_fields||0} Other/unknown-crop fields. ${health.dem_available?'DEM available.':'DEM is unavailable.'} Warnings: ${health.warnings.join(' | ')}`, 'warning');
+    setStatus(`Map loaded with ${fieldLoad.loaded} agricultural fields; excluded ${health.excluded_crop_fields||0} Other/unknown-crop fields. ${health.dem_available?'DEM available.':'DEM is unavailable.'} Warnings: ${health.warnings.join(' | ')}`, 'warning');
   } else {
-    setStatus(`Map loaded: ${health.fields_count} retained crop fields; excluded ${health.excluded_crop_fields||0} Other/unknown-crop fields. DEM ${health.dem_available?'available':'unavailable'}.` ,health.dem_available?'normal':'warning');
+    setStatus(`Map loaded with ${fieldLoad.loaded} agricultural fields; excluded ${health.excluded_crop_fields||0} Other/unknown-crop fields. DEM ${health.dem_available?'available':'unavailable'}.` ,health.dem_available?'normal':'warning');
   }
 }
 
@@ -717,21 +861,30 @@ $('recalculatePrices').addEventListener('click',async()=>{
   } catch(err) {setStatus(err.message,'error');}
   finally {setBusy(false);}
 });
-function showScenarioOnMap(result) {
+async function showScenarioOnMap(result) {
   if (currentFloodLayer) {layerControl.removeLayer(currentFloodLayer); if(map.hasLayer(currentFloodLayer))map.removeLayer(currentFloodLayer);}
   if (currentAffectedLayer) {layerControl.removeLayer(currentAffectedLayer); if(map.hasLayer(currentAffectedLayer))map.removeLayer(currentAffectedLayer);}
   currentFloodLayer=null; currentAffectedLayer=null;
- 
+  clearFieldImpactProperties();
+
+  // Compatibility with older API responses. The current server sends attributes in
+  // pages instead of duplicating field geometries in the simulation response.
   if (result.fields && result.fields.length) {
     currentAffectedLayer=L.geoJSON(result.fields,{pane:paneForLayer('Affected crop fields'),style:{color:mapColors.affectedFields,weight:1.5,fillColor:mapColors.affectedFields,fillOpacity:.68},onEachFeature:featurePopup});
-    overlayLayers['Affected crop fields']=currentAffectedLayer; layerControl.addOverlay(currentAffectedLayer,'Affected crop fields'); currentAffectedLayer.addTo(map);
+    overlayLayers['Affected crop fields']=currentAffectedLayer;
+    layerControl.addOverlay(currentAffectedLayer,'Affected crop fields');
+    currentAffectedLayer.addTo(map);
+  }
+  if (result.scenario_id) {
+    const affectedCount = await loadScenarioFieldMetrics(result.scenario_id);
+    setStatus(`Scenario complete: ${number(affectedCount)} affected agricultural fields highlighted. Click a highlighted polygon to view crop, affected area, depth, duration and estimated loss.`,'warning');
   }
   applyLayerDrawingOrder();
   refreshLayerControlExtras();
 }
 async function simulateAtShift(shift, render=true) {
   const result=await postJSON('/api/simulate',makePayload(shift));
-  if(render) {renderStats(result);showScenarioOnMap(result);}
+  if(render) {renderStats(result); await showScenarioOnMap(result);}
   return result;
 }
 function setBusy(busy) {
