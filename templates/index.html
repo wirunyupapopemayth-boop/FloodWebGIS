@@ -567,8 +567,6 @@ async function loadMap() {
   x=staticLayer('Flood-prone areas',data.flood_prone,{color:mapColors.floodProne,weight:1.5,fillColor:mapColors.floodProne,fillOpacity:0.20});
   x=staticLayer('Waterways',data.waterways,{color:mapColors.waterways,weight:2,fillOpacity:0.12});
   x=staticLayer('Roads',data.roads,{color:mapColors.roads,weight:1.2,fillOpacity:0});
-  const fields=await getJSON('/api/fields');
-  x=staticLayer('Crop fields',fields,feature=>({color:'#fff',weight:0.6,fillColor:mapColors.crops[(feature.properties||{}).crop_type]||'#999999',fillOpacity:0.58}));
   const info=await getJSON('/api/dem-info').catch(()=>({available:false}));
   if(info.available && info.bounds) {
     demLayer=L.imageOverlay('/api/dem?palette='+encodeURIComponent($('demPalette').value),info.bounds,{pane:paneForLayer('DEM elevation image'),opacity:Number($('demOpacity').value)/100,interactive:false});
