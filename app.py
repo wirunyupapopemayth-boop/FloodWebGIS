@@ -23,7 +23,7 @@ app = Flask(__name__)
 # Shapefile sidecar files (.dbf, .shx, .prj, etc.) must also be present.
 # =====================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEM_FILE = os.path.join(BASE_DIR, "nsn_dem4.tif")
+DEM_FILE = os.path.join(BASE_DIR, "nsn_dem30m.tif")
 SHAPEFILE = os.path.join(BASE_DIR, "Fields.shp")
 WATERWAY_FILE = os.path.join(BASE_DIR, "nsn_wtwpoly.shp")
 ROADS_FILE = os.path.join(BASE_DIR, "nsn_road2.shp")
