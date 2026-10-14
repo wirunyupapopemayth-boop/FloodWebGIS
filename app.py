@@ -27,7 +27,7 @@ app = Flask(__name__)
 # =====================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEM_FILE = os.path.join(BASE_DIR, "nsn_dem30m.tif")
-SHAPEFILE = os.path.join(BASE_DIR, "Fields.shp")
+SHAPEFILE = os.path.join(BASE_DIR, "Fields2.shp")
 WATERWAY_FILE = os.path.join(BASE_DIR, "nsn_wtwpoly.shp")
 ROADS_FILE = os.path.join(BASE_DIR, "nsn_road2.shp")
 BOUNDARY_FILE = os.path.join(BASE_DIR, "nsn_prov.shp")
