@@ -130,13 +130,13 @@ def geojson_features(gdf, tolerance=DISPLAY_SIMPLIFY_TOLERANCE, fields_layer=Fal
                 continue
             props = {"name": str(row.get("name", f"Feature_{idx}"))}
             if fields_layer:
-                crop = str(row.get("crop_type", "Other Crops"))
+                crop = str(row.get("Crop_type", "Other Crops"))
                 if crop not in CROP_TYPES:
                     crop = "Other Crops"
                 # Use the area calculated in a projected CRS (m²), not WGS84 degrees.
                 props.update({
                     "name": str(row.get("name", f"Field_{idx}")),
-                    "crop_type": crop,
+                    "Crop_type": crop,
                     "area_m2": float(row.get("area_m2", 0.0)),
                     "color": COLORS.get(crop, "#999999"),
                     "field_id": str(idx)
@@ -232,22 +232,22 @@ def load_all_data():
     load_dem()
     fields = load_vector(SHAPEFILE, "Fields")
     if fields is not None:
-        if "crop_type" not in fields.columns:
+        if "Crop_type" not in fields.columns:
             # Do not drop every field blindly when the expected attribute is absent.
             # In that case, the actual crop-name column must be identified in Fields.shp.
-            fields["crop_type"] = "Other Crops"
+            fields["Crop_type"] = "Other Crops"
             startup_warnings.append(
-                "Fields.shp has no 'crop_type' column. Could not safely filter Other Crops; "
+                "Fields.shp has no 'Crop_type' column. Could not safely filter Other Crops; "
                 "all fields are temporarily labelled Other Crops. Check the source attribute names."
             )
         else:
             # Normalize known crop labels and map unknown/null values to Other Crops.
             crop_lookup = {name.casefold(): name for name in CROP_TYPES}
-            source_crop = fields["crop_type"].fillna("Other Crops").astype(str).str.strip()
-            fields["crop_type"] = source_crop.map(lambda value: crop_lookup.get(value.casefold(), "Other Crops"))
+            source_crop = fields["Crop_type"].fillna("Other Crops").astype(str).str.strip()
+            fields["Crop_type"] = source_crop.map(lambda value: crop_lookup.get(value.casefold(), "Other Crops"))
             if EXCLUDE_OTHER_CROPS:
                 before = len(fields)
-                fields = fields[fields["crop_type"].isin(["Rice", "Cassava", "Corn", "Sugarcane", "Fruits"])].copy()
+                fields = fields[fields["Crop_type"].isin(["Rice", "Cassava", "Corn", "Sugarcane", "Fruits"])].copy()
                 excluded_crop_count = before - len(fields)
                 print(f"Crop filter: kept {len(fields)} fields; excluded {excluded_crop_count} Other/unknown crop fields.")
                 startup_warnings.append(
@@ -256,7 +256,7 @@ def load_all_data():
         # Area in square metres using a projected CRS suitable for the study area.
         fields["area_m2"] = fields.to_crs(UTM_CRS).geometry.area.values
         fields_utm = fields.to_crs(UTM_CRS)
-        fields_utm["crop_type"] = fields["crop_type"].values
+        fields_utm["Crop_type"] = fields["Crop_type"].values
         fields_utm["area_m2"] = fields["area_m2"].values
         fields_web = fields_utm.to_crs(WGS_CRS)
     else:
@@ -567,7 +567,7 @@ def simulate_flood(payload):
         if total_pixels <= 0:
             continue
         field_row = fields_utm.loc[idx]
-        crop = str(field_row.get("crop_type", "Other Crops"))
+        crop = str(field_row.get("Crop_type", "Other Crops"))
         if crop not in CROP_TYPES:
             crop = "Other Crops"
         total_area_m2 = float(field_row.get("area_m2", 0.0))
@@ -617,7 +617,7 @@ def simulate_flood(payload):
         affected_features.append({
             "type": "Feature", "geometry": mapping(web_row.geometry),
             "properties": {
-                "name": str(web_row.get("name", f"Field_{idx}")), "crop_type": crop,
+                "name": str(web_row.get("name", f"Field_{idx}")), "Crop_type": crop,
                 "area_rai": round(total_area_rai, 3),
                 "affected_area_rai": round(affected_area_rai, 3),
                 "flood_fraction": round(fraction, 4),
