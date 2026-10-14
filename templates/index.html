@@ -723,10 +723,7 @@ function showScenarioOnMap(result) {
   if (currentFloodLayer) {layerControl.removeLayer(currentFloodLayer); if(map.hasLayer(currentFloodLayer))map.removeLayer(currentFloodLayer);}
   if (currentAffectedLayer) {layerControl.removeLayer(currentAffectedLayer); if(map.hasLayer(currentAffectedLayer))map.removeLayer(currentAffectedLayer);}
   currentFloodLayer=null; currentAffectedLayer=null;
-  if (result.flood_geojson && result.flood_geojson.length) {
-    currentFloodLayer=L.geoJSON(result.flood_geojson,{pane:paneForLayer('Simulated flood extent'),style:{color:mapColors.simulatedFlood,weight:1.5,fillColor:mapColors.simulatedFlood,fillOpacity:.34}});
-    overlayLayers['Simulated flood extent']=currentFloodLayer; layerControl.addOverlay(currentFloodLayer,'Simulated flood extent'); currentFloodLayer.addTo(map);
-  }
+ 
   if (result.fields && result.fields.length) {
     currentAffectedLayer=L.geoJSON(result.fields,{pane:paneForLayer('Affected crop fields'),style:{color:mapColors.affectedFields,weight:1.5,fillColor:mapColors.affectedFields,fillOpacity:.68},onEachFeature:featurePopup});
     overlayLayers['Affected crop fields']=currentAffectedLayer; layerControl.addOverlay(currentAffectedLayer,'Affected crop fields'); currentAffectedLayer.addTo(map);

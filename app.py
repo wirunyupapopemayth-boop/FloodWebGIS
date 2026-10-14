@@ -524,37 +524,113 @@ def simulate_flood(payload):
     valid_dem = np.isfinite(dem_data)
 
     # Rasterize all field polygons once. Field polygons are assumed to be non-overlapping.
-    fields_dem = fields_utm.to_crs(dem_crs)
+        # Rasterize all fields once using a compact integer raster.
+    fields_dem = (
+        fields_utm
+        if fields_utm.crs == dem_crs
+        else fields_utm.to_crs(dem_crs)
+    )
+
     raster_shapes = []
     row_by_code = {}
+
     for code, (idx, row) in enumerate(fields_dem.iterrows(), start=1):
         geom = row.geometry
         if geom is None or geom.is_empty:
             continue
         raster_shapes.append((geom, code))
         row_by_code[code] = idx
+
     if not raster_shapes:
         raise ValueError("No valid field polygons could be rasterized")
+
+    max_code = max(row_by_code)
+    if max_code > np.iinfo(np.uint16).max:
+        raise ValueError("Too many fields for compact raster labels")
+
+    num_codes = max_code + 1
+
     labels = rasterize(
-        raster_shapes, out_shape=dem_data.shape, transform=dem_transform,
-        fill=0, all_touched=False, dtype="int32"
+        raster_shapes,
+        out_shape=dem_data.shape,
+        transform=dem_transform,
+        fill=0,
+        all_touched=False,
+        dtype="uint16"
     )
-    total_counts = np.bincount(labels[valid_dem], minlength=len(row_by_code) + 1)
-    flooded_valid = flood_mask & valid_dem
-    flooded_labels = labels[flooded_valid]
-    flooded_counts = np.bincount(flooded_labels, minlength=len(row_by_code) + 1)
-    # Per-grid water depth and the depth-duration part of the illustrative fragility function.
-    # f_c(h,d) = phi_c * min(1, h / h_ref) * min(1, d / d_ref).
-    # The same user-entered duration currently applies to each flooded grid; a hydrodynamic
-    # duration raster could replace this assumption in a more advanced model.
-    depths = np.maximum(0.0, water_level - dem_data[flooded_valid])
-    depth_sum = np.bincount(flooded_labels, weights=depths, minlength=len(row_by_code) + 1)
-    duration_response = min(1.0, flood_duration_days / fragility_reference_duration_days)
-    depth_response = np.clip(depths / fragility_reference_depth_m, 0.0, 1.0)
-    fragility_basis = depth_response * duration_response
-    fragility_basis_sum = np.bincount(
-        flooded_labels, weights=fragility_basis, minlength=len(row_by_code) + 1
+
+    # Accumulate statistics in row blocks to avoid large temporary arrays.
+    total_counts = np.zeros(num_codes, dtype=np.int64)
+    flooded_counts = np.zeros(num_codes, dtype=np.int64)
+    depth_sum = np.zeros(num_codes, dtype=np.float64)
+    fragility_basis_sum = np.zeros(num_codes, dtype=np.float64)
+
+    duration_response = min(
+        1.0,
+        flood_duration_days / fragility_reference_duration_days
     )
+
+    block_rows = 256
+
+    for y0 in range(0, dem_data.shape[0], block_rows):
+        y1 = min(y0 + block_rows, dem_data.shape[0])
+
+        dem_block = dem_data[y0:y1, :]
+        labels_block = labels[y0:y1, :]
+        valid_block = np.isfinite(dem_block)
+
+        if valid_block.any():
+            valid_codes = labels_block[valid_block].astype(
+                np.int32, copy=False
+            )
+            total_counts += np.bincount(
+                valid_codes, minlength=num_codes
+            )
+
+        flooded_block = (
+            valid_block
+            & flood_mask[y0:y1, :]
+            & (labels_block > 0)
+        )
+
+        if not flooded_block.any():
+            continue
+
+        flooded_codes = labels_block[flooded_block].astype(
+            np.int32, copy=False
+        )
+
+        flooded_counts += np.bincount(
+            flooded_codes, minlength=num_codes
+        )
+
+        depth_values = np.maximum(
+            0.0,
+            water_level - dem_block[flooded_block]
+        ).astype(np.float32, copy=False)
+
+        depth_sum += np.bincount(
+            flooded_codes,
+            weights=depth_values,
+            minlength=num_codes
+        )
+
+        depth_response = np.clip(
+            depth_values / fragility_reference_depth_m,
+            0.0,
+            1.0
+        )
+
+        fragility_basis = depth_response * duration_response
+
+        fragility_basis_sum += np.bincount(
+            flooded_codes,
+            weights=fragility_basis,
+            minlength=num_codes
+        )
+
+    # Free the large label raster before building the response.
+    del labels
 
     stats = {crop: {"area_total_rai": 0.0, "area_affected_rai": 0.0,
                     "value_at_risk_baht": 0.0, "loss_baht": 0.0,
@@ -640,7 +716,6 @@ def simulate_flood(payload):
         connected_note = "Connectivity was requested; if no suitable waterway seed cells existed, the model fell back to the elevation-threshold mask."
     return {
         "fields": affected_features,
-        "flood_geojson": flood_mask_geojson(flood_mask),
         "stats": stats,
         "summary": {
             "river_level": water_level,
