@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flood & Agricultural Impact WebGIS</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{font-family:Arial,sans-serif;color:#17212b;background:#f4f7fa}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+.app{height:100%;display:grid;grid-template-columns:minmax(0,1fr) 380px;position:relative}
+.sidebar{grid-column:2;grid-row:1;min-width:0;overflow:auto;padding:16px;background:#f7f9fb;border-left:1px solid #d9e1e8;box-shadow:-3px 0 14px #17212b08;z-index:500}
+.map-wrap{grid-column:1;grid-row:1;min-width:0;min-height:0;position:relative}
+#map{width:100%;height:100%;background:#e8eef2}
+.panel-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+.panel-head .head-copy{min-width:0;flex:1}
+.panel-head h1{font-size:20px;margin:0 0 5px}
+.panel-toggle{width:auto;flex:0 0 auto;margin:0;padding:7px 9px;font-size:11px;white-space:nowrap}
+.map-toggle{display:none;position:absolute;top:70px;right:10px;left:auto;z-index:1000;width:auto;max-width:calc(100% - 20px);margin:0;box-shadow:0 2px 10px #0003}
+h2{font-size:14px;margin:19px 0 9px;padding-bottom:5px;border-bottom:1px solid #dfe6ed}
+.sub{font-size:11px;color:#61707e;line-height:1.45}
+.field{margin:10px 0}
+label{display:block;font-size:12px;font-weight:700;margin-bottom:5px}
+input,select,button{font:inherit}
+input[type=number],input[type=date],select{width:100%;padding:8px;border:1px solid #c7d1dc;border-radius:6px;background:white;color:#17212b}
+input[type=range]{width:100%;accent-color:#1769d2}
+.range-line{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:11px;margin-bottom:4px}
+.range-line label{margin:0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+button{width:100%;padding:10px 12px;border:0;border-radius:7px;background:#1769d2;color:white;font-weight:700;cursor:pointer;margin-top:8px}
+button.secondary{background:#e1eaf3;color:#1e3550}
+button:disabled{opacity:.55;cursor:wait}
+.card{background:#fff;border:1px solid #e0e6ec;border-radius:8px;padding:11px;margin-top:9px}
+.kpi-label{font-size:11px;color:#667581}
+.kpi{font-size:20px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}
+.status{font-size:12px;padding:10px;border-radius:7px;background:#e8f1fa;margin-top:10px;line-height:1.5;overflow-wrap:anywhere}
+.status.error{background:#fdebec;color:#8b1f28}
+.status.warning{background:#fff4dc;color:#725116}
+.table-wrap{overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:11px}
+td,th{padding:6px 4px;border-bottom:1px solid #e6ebef;text-align:right}
+td:first-child,th:first-child{text-align:left}
+.legend{background:white;padding:10px;border-radius:7px;box-shadow:0 1px 7px #0002;font-size:11px;line-height:1.8}
+.swatch{display:inline-block;width:13px;height:10px;margin-right:6px;border:1px solid #aaa}
+.small-note{font-size:10px;color:#63717d;line-height:1.4;margin-top:10px}
+.price-input{width:82px;max-width:100%;padding:5px 4px;border:1px solid #c7d1dc;border-radius:5px;font-size:11px;text-align:right}
+.price-action{margin-top:8px}
+.map-style-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.leaflet-control-layers-overlays{min-width:220px}
+.leaflet-layer-order-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:5px;padding:3px 0;border-bottom:1px solid #edf0f3}
+.leaflet-layer-order-row:first-child{background:#f4f8ff}
+.leaflet-layer-order-row>label{display:flex;align-items:flex-start;gap:4px;min-width:0;width:100%;margin:0;padding:3px 2px;cursor:pointer;font-size:12px;line-height:1.3}
+.leaflet-layer-order-row>label input{flex:0 0 auto;margin-top:2px}
+.leaflet-layer-order-row>label span{min-width:0;overflow-wrap:anywhere;white-space:normal}
+.leaflet-layer-order-buttons{display:flex;align-items:center;gap:2px;padding-right:1px}
+.leaflet-layer-order-buttons button{display:inline-flex;align-items:center;justify-content:center;width:23px;min-width:23px;height:23px;margin:0;padding:0;border:1px solid #d2dce6;border-radius:4px;background:#edf3f8;color:#22394f;font-size:12px;font-weight:700;line-height:1;cursor:pointer}
+.leaflet-layer-order-buttons button:hover:not(:disabled){background:#dbe9f8;border-color:#8fb3dc}
+.leaflet-layer-order-buttons button:disabled{opacity:.28;cursor:not-allowed}
+.layer-order-reset{display:block;width:auto;margin:7px 0 0;padding:6px 8px;border:1px solid #d4dde6;border-radius:5px;background:#f0f4f8;color:#293e52;font-size:10px;font-weight:700;line-height:1.25}
+.layer-order-hint{font-size:10px;line-height:1.35;color:#64717e;margin:2px 0 5px}
+.map-style-item{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;font-weight:normal;margin:0;padding:7px;background:#fff;border:1px solid #e4e9ee;border-radius:6px}
+.map-style-item span{line-height:1.3}
+.map-style-item input[type=color]{width:34px;height:28px;padding:2px;border:1px solid #c7d1dc;border-radius:5px;background:white;flex:0 0 auto;cursor:pointer}
+.map-style-item select{width:112px;padding:6px;font-size:11px}
+.north-arrow-control{background:rgba(255,255,255,.94);border:1px solid #cfd6dd;border-radius:6px;box-shadow:0 1px 5px #0002;padding:5px 6px;text-align:center;line-height:1}
+.north-arrow-control .north-label{font-size:12px;font-weight:800;color:#17212b;margin-bottom:1px}
+.north-arrow-control svg{display:block;width:24px;height:30px;margin:auto}
+.leaflet-control-scale{margin-bottom:12px!important}
+/* Keep the layer chooser compact and allow the entire control to collapse. */
+.leaflet-control-layers{max-width:285px;max-height:calc(100vh - 95px)}
+.leaflet-control-layers-expanded .leaflet-control-layers-list{max-height:calc(100vh - 125px);overflow-y:auto;overflow-x:hidden}
+.references-sidebar{font-size:11px;line-height:1.45;overflow-wrap:anywhere}
+.references-sidebar details{border-bottom:1px solid #e5ebf0;padding:8px 0}
+.references-sidebar details:last-child{border-bottom:0}
+.references-sidebar summary{cursor:pointer;font-weight:700;line-height:1.4}
+.references-sidebar .reference-body{padding:7px 2px 2px;color:#42515e;overflow-wrap:anywhere}
+.references-sidebar .reference-equation{display:block;background:#f2f6fa;border:1px solid #e0e8f0;border-radius:5px;padding:8px;margin:6px 0;font-weight:700;text-align:center;overflow-wrap:anywhere}
+.references-sidebar p{margin:6px 0}
+.references-sidebar a{overflow-wrap:anywhere}
+.references-sidebar ul{margin:6px 0;padding-left:18px}
+.references-sidebar li{margin:7px 0}
+.check-label{display:flex;gap:7px;align-items:flex-start;font-size:11px;line-height:1.35;font-weight:normal}
+.check-label input{margin-top:1px}
+.compare-box{font-size:12px;line-height:1.6}
+.compare-box strong{font-size:13px}
+.app.calculator-hidden{grid-template-columns:minmax(0,1fr)}
+.app.calculator-hidden .sidebar{display:none}
+.app.calculator-hidden .map-wrap{grid-column:1;grid-row:1}
+.app.calculator-hidden .map-toggle{display:block}
+@media(max-width:850px){
+ html,body{height:auto;min-height:100%}
+ .app{height:auto;min-height:100vh;display:flex;flex-direction:column}
+ .map-wrap{grid-column:auto;grid-row:auto;height:48vh;min-height:340px;order:0}
+ .sidebar{grid-column:auto;grid-row:auto;order:1;overflow:visible;border:0;border-top:1px solid #d9e1e8;box-shadow:none}
+ .leaflet-control-layers{max-width:190px}
+ .layer-order-row{grid-template-columns:24px minmax(0,1fr) 31px 31px}
+ .app.calculator-hidden .map-wrap{height:100vh;min-height:100vh}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="calculatorPanel">
+    <div class="panel-head">
+      <div class="head-copy">
+        <h1>Flood & Agricultural Impact</h1>
+        <div class="sub">Side panel for flood scenarios, crop-loss estimates, and planting-date comparisons.</div>
+      </div>
+      <button type="button" id="hideCalculator" class="panel-toggle secondary" aria-label="Hide flood calculator">Hide</button>
+    </div>
+
+    <h2>Flood scenario</h2>
+    <div class="field">
+      <div class="range-line"><label for="waterLevel">Water-surface elevation</label><strong id="levelLabel">— m</strong></div>
+      <input id="waterLevel" type="range" min="0" max="100" step="0.1" value="30">
+      <div class="range-line"><span id="levelMin">0 m</span><span id="levelMax">100 m</span></div>
+      <div class="sub">This is an elevation above the DEM's vertical datum, not floodwater depth. Use the same units/reference as the DEM.</div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label for="waterMinLimit">Minimum water level (m)</label><input id="waterMinLimit" type="number" step="any" value="0"></div>
+      <div class="field"><label for="waterMaxLimit">Maximum water level (m)</label><input id="waterMaxLimit" type="number" step="any" value="100"></div>
+    </div>
+    <button type="button" id="applyLevelLimits" class="secondary">Apply water-level limits</button>
+    <div class="sub">Initial suggestions come from the DEM 2nd–98th percentile range. You can enter your own limits; they set the selectable range, not a hydraulic boundary condition.</div>
+    <div class="grid2">
+      <div class="field"><label for="scenarioDate">Reference planting date</label><input id="scenarioDate" type="date"></div>
+      <div class="field"><label for="daysFlood">Days until flood</label><input id="daysFlood" type="number" min="0" max="730" value="60"></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label for="floodDurationDays">Flood duration (days)</label><input id="floodDurationDays" type="number" min="0" max="365" step="1" value="3"></div>
+      <div class="field"><label for="fragilityReferenceDepth">Reference depth h* (m)</label><input id="fragilityReferenceDepth" type="number" min="0.01" step="any" value="1"></div>
+    </div>
+    <div class="field"><label for="fragilityReferenceDuration">Reference duration d* (days)</label><input id="fragilityReferenceDuration" type="number" min="0.01" step="any" value="7"></div>
+    <div class="sub">The provisional function scales fragility linearly to h* and d*, then caps the response at 1. Set h* and d* to the depth and duration where the response reaches its maximum.</div>
+    <div class="field">
+      <label class="check-label"><input id="connectedOnly" type="checkbox"> Only include low cells connected to mapped waterways (experimental)</label>
+    </div>
+
+    <h2>Crop assumptions</h2>
+    <div class="field"><label for="crop">Crop to edit</label><select id="crop"></select></div>
+    <div class="grid2">
+      <div class="field"><label for="yield">Harvest H (kg/ha)</label><input id="yield" type="number" min="0" step="any"></div>
+      <div class="field"><label for="price">Price (baht/kg)</label><input id="price" type="number" min="0" step="any"></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label for="duration">Crop duration (days)</label><input id="duration" type="number" min="1" step="1"></div>
+      <div class="field"><label for="damage">Maximum fragility multiplier φ (0–1)</label><input id="damage" type="number" min="0" max="1" step="0.05"></div>
+    </div>
+    <div class="field">
+      <div class="range-line"><label for="shift">Shift planting date</label><strong id="shiftLabel">0 days</strong></div>
+      <input id="shift" type="range" min="-90" max="90" step="5" value="0">
+      <div class="range-line"><span>90 days earlier</span><span>90 days later</span></div>
+    </div>
+    <div class="sub">H is harvest in kg/ha and P is price in baht/kg. The multiplier φ and example depth-duration response are provisional; replace them with a crop-specific fragility curve when available.</div>
+
+    <button id="runButton">Run selected scenario</button>
+    <button id="compareButton" class="secondary">Compare original and shifted planting</button>
+    <div id="busy" class="sub" style="display:none;margin-top:8px">Calculating scenario…</div>
+    <div id="status" class="status">Loading map data…</div>
+
+    <h2>Scenario results</h2>
+    <div class="grid2">
+      <div class="card"><div class="kpi-label">Affected crop area</div><div class="kpi" id="affected">—</div><div class="sub">rai</div></div>
+      <div class="card"><div class="kpi-label">Estimated crop loss</div><div class="kpi" id="loss">—</div><div class="sub">baht</div></div>
+    </div>
+    <div class="card"><div class="kpi-label">Value of production at risk</div><div class="kpi" id="risk">—</div><div class="sub">baht; not necessarily the amount lost</div></div>
+    <div class="card">
+      <strong style="font-size:12px">Loss and farm-gate price by crop</strong>
+      <div class="sub" style="margin:5px 0 8px">Enter a price for each crop (baht/kg), then recalculate so all totals use the updated prices.</div>
+      <div class="table-wrap"><table><thead><tr><th>Crop</th><th>Area (rai)</th><th>Price (฿/kg)</th><th>Loss (฿)</th></tr></thead><tbody id="stats"><tr><td colspan="4">Run a scenario to see results.</td></tr></tbody></table></div>
+      <button type="button" id="recalculatePrices" class="secondary price-action">Recalculate using crop prices</button>
+      <div id="priceStatus" class="sub" style="margin-top:6px">Prices may be edited independently for each crop.</div>
+    </div>
+    <div id="compareResult" class="card compare-box" style="display:none"></div>
+    <h2>Map appearance</h2>
+    <div class="card">
+      <strong style="font-size:12px">Change layer colours</strong>
+      <div class="sub" style="margin:5px 0 9px">Colour changes apply immediately to visible map layers for this browser session.</div>
+      <div class="map-style-grid">
+        <label class="map-style-item"><span>Province boundary</span><input id="colorBoundary" type="color" value="#e53935"></label>
+        <label class="map-style-item"><span>Flood-prone areas</span><input id="colorFloodProne" type="color" value="#1769ff"></label>
+        <label class="map-style-item"><span>Waterways</span><input id="colorWaterways" type="color" value="#00a8d6"></label>
+        <label class="map-style-item"><span>Roads</span><input id="colorRoads" type="color" value="#555555"></label>
+        <label class="map-style-item"><span>Simulated flood</span><input id="colorSimulatedFlood" type="color" value="#1685ff"></label>
+        <label class="map-style-item"><span>Affected fields</span><input id="colorAffectedFields" type="color" value="#ef5350"></label>
+        <label class="map-style-item"><span>Rice fields</span><input id="colorRice" type="color" value="#4caf50"></label>
+        <label class="map-style-item"><span>Cassava fields</span><input id="colorCassava" type="color" value="#914624"></label>
+        <label class="map-style-item"><span>Corn fields</span><input id="colorCorn" type="color" value="#ffeb3b"></label>
+        <label class="map-style-item"><span>Sugarcane fields</span><input id="colorSugarcane" type="color" value="#934ac3"></label>
+        <label class="map-style-item"><span>Fruit fields</span><input id="colorFruits" type="color" value="#f762b9"></label>
+      </div>
+      <div class="field" style="margin-top:12px">
+        <label for="demPalette">DEM colour ramp</label>
+        <select id="demPalette">
+          <option value="terrain">Terrain (blue–green–brown)</option>
+          <option value="grayscale">Grayscale</option>
+          <option value="ocean">Ocean–land</option>
+          <option value="warm">Warm elevation</option>
+        </select>
+      </div>
+      <div class="field">
+        <div class="range-line"><label for="demOpacity">DEM transparency</label><strong id="demOpacityLabel">45%</strong></div>
+        <input id="demOpacity" type="range" min="0" max="100" step="5" value="45">
+      </div>
+      <button type="button" id="resetMapStyle" class="secondary">Reset map colours</button>
+      <div class="small-note">Vector layer colours and the DEM colour ramp can be changed. If roads or flood-prone polygons are disabled in app.py to improve loading speed, their colours will apply when those layers are enabled.</div>
+    </div>
+    <div class="small-note">Flood extent is a DEM elevation-threshold (“bathtub”) screening model, not a hydraulic forecast. All flooded cells currently use the same user-entered flood duration; duration is not derived independently for each pixel.</div>
+
+    <h2>References</h2>
+    <div class="card references-sidebar" id="referencesPanel">
+      <details>
+        <summary>Flood extent: DEM threshold / bathtub approach</summary>
+        <div class="reference-body">
+          <p><strong>Screening equation</strong></p>
+          <span class="reference-equation">Fᵢ = 1 if H ≥ zᵢ; otherwise Fᵢ = 0</span>
+          <span class="reference-equation">hᵢ = max(H − zᵢ, 0)</span>
+          <p>H is the user-selected water-surface elevation, zᵢ is DEM ground elevation, and hᵢ is estimated depth. The optional connected-waterway setting restricts the flood mask to cells connected to mapped waterways when a valid seed intersection is found. These equations describe the simplified screening method in this WebGIS; they are not a full hydraulic simulation.</p>
+          <ul>
+            <li>U.S. Geological Survey (USGS). <em>Flood Inundation Mapping Science.</em> <a href="https://www.usgs.gov/mission-areas/water-resources/science/flood-inundation-mapping-science" target="_blank" rel="noopener noreferrer">Official source</a>.</li>
+            <li>Esri. <em>Flood Simulation in ArcGIS Pro</em> (technical paper). The ArcGIS simulation describes a more complete flow model using continuity and momentum equations; this WebGIS does not implement that full model. <a href="https://www.esri.com/content/dam/esrisites/en-us/media/technical-papers/flood-simulation-arcgis-pro.pdf" target="_blank" rel="noopener noreferrer">Technical paper (PDF)</a>.</li>
+            <li>Gesch, D. B. (2018). <em>Best Practices for Elevation-Based Assessments of Sea-Level Rise and Coastal Flooding Exposure.</em> <em>Frontiers in Earth Science, 6</em>, 230. <a href="https://doi.org/10.3389/feart.2018.00230" target="_blank" rel="noopener noreferrer">https://doi.org/10.3389/feart.2018.00230</a>.</li>
+          </ul>
+        </div>
+      </details>
+      <details>
+        <summary>Agricultural damage equation</summary>
+        <div class="reference-body">
+          <span class="reference-equation">D = H × P × Σᵢ[aᵢ × f(hᵢ,dᵢ)]</span>
+          <p>This equation structure is Equation (1), Section 3.2, in Budhathoki, A., Tanaka, T., &amp; Tachikawa, Y. (2024). “Developing flood risk curves of agricultural economic damage under climate change in the Lower Chao Phraya River Basin, Thailand.” <em>Journal of Flood Risk Management, 17</em>(4), e13031.</p>
+          <p><a href="https://doi.org/10.1111/jfr3.13031" target="_blank" rel="noopener noreferrer">https://doi.org/10.1111/jfr3.13031</a></p>
+          <p><strong>Implementation note:</strong> The current f(h,d) function in this WebGIS is a provisional example. It is not the paper’s calibrated rice fragility curve and has not been validated for every crop type. The article studies rice in the Lower Chao Phraya River Basin.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Related agricultural flood-risk reference</summary>
+        <div class="reference-body">
+          Susutti, W., Dilokpatpongsa, P., Kaemawichanurat, P., Saleewong, T., Dhakonlayodhin, B., Supapakorn, T., &amp; Watthayu, W. (2025). “Database System and Model for Predicting Risk Level of Flood That Damages Rice Farming in Thailand.” <em>Statistics, Optimization and Information Computing, 14</em>(5), 2874–2891.
+          <p><a href="https://doi.org/10.19139/soic-2310-5070-2595" target="_blank" rel="noopener noreferrer">https://doi.org/10.19139/soic-2310-5070-2595</a></p>
+          <p>This is a related study on rice-farming flood-risk prediction; it is not the source of the damage equation above.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Flood depth reference</summary>
+        <div class="reference-body">
+          Cohen, S. et al. (2018). “Estimating floodwater depths from flood inundation maps and topography.” <em>Journal of the American Water Resources Association, 54</em>(4), 847–858. <a href="https://doi.org/10.1111/1752-1688.12609" target="_blank" rel="noopener noreferrer">https://doi.org/10.1111/1752-1688.12609</a>.
+        </div>
+      </details>
+    </div>
+  </aside>
+  <main class="map-wrap"><div id="map"></div><button type="button" id="openCalculator" class="map-toggle">Open flood calculator</button></main>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+'use strict';
+// Start at Nakhon Sawan; after loading, fit the viewport to the province boundary only.
+const map = L.map('map').setView([15.70, 100.13], 9);
+const appShell = document.querySelector('.app');
+const $ = id => document.getElementById(id);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+// Separate panes let users control stacking even between vector layers and the DEM image.
+const layerPanes = {
+  'Province boundary':'pane-province-boundary',
+  'Flood-prone areas':'pane-flood-prone',
+  'Waterways':'pane-waterways',
+  'Roads':'pane-roads',
+  'Crop fields':'pane-crop-fields',
+  'DEM elevation image':'pane-dem-image',
+  'Simulated flood extent':'pane-simulated-flood',
+  'Affected crop fields':'pane-affected-crops'
+};
+const defaultLayerOrder = [
+  'Province boundary', 'Affected crop fields', 'Crop fields',
+  'Simulated flood extent', 'Roads', 'Waterways',
+  'Flood-prone areas', 'DEM elevation image'
+];
+let layerDrawOrder = defaultLayerOrder.slice();
+Object.values(layerPanes).forEach(paneName => {
+  if (!map.getPane(paneName)) map.createPane(paneName);
+});
+function paneForLayer(layerName) { return layerPanes[layerName] || 'overlayPane'; }
+function applyLayerDrawingOrder() {
+  // The layer order control is top-to-bottom. Higher z-index means visually in front.
+  const count = layerDrawOrder.length;
+  layerDrawOrder.forEach((layerName, index) => {
+    const pane = map.getPane(paneForLayer(layerName));
+    if (pane) pane.style.zIndex = String(400 + (count - index) * 10);
+  });
+}
+function moveLayerInOrder(layerName, direction) {
+  // The buttons live beside the layer checkboxes. Reorder adjacent layers currently
+  // listed in that same control, while preserving the relative slots of other panes.
+  const names = getLayerControlNamesInDisplayOrder();
+  const index = names.indexOf(layerName);
+  const targetIndex = index + direction;
+  if (index < 0 || targetIndex < 0 || targetIndex >= names.length) return;
+  const otherName = names[targetIndex];
+  const from = layerDrawOrder.indexOf(layerName);
+  const to = layerDrawOrder.indexOf(otherName);
+  if (from < 0 || to < 0) return;
+  [layerDrawOrder[from], layerDrawOrder[to]] = [layerDrawOrder[to], layerDrawOrder[from]];
+  applyLayerDrawingOrder();
+  syncLayerControlOrderControls();
+}
+function resetLayerDrawingOrder() {
+  layerDrawOrder = defaultLayerOrder.slice();
+  applyLayerDrawingOrder();
+  syncLayerControlOrderControls();
+}
+applyLayerDrawingOrder();
+// North arrow and metric scale bar (drawn by Leaflet, not baked into the map image).
+const NorthArrowControl = L.Control.extend({
+  options: {position: 'topleft'},
+  onAdd: function() {
+    const container = L.DomUtil.create('div', 'leaflet-control north-arrow-control');
+    container.title = 'North direction';
+    container.setAttribute('aria-label', 'North arrow');
+    container.innerHTML = '<div class="north-label">N</div><svg viewBox="0 0 24 30" aria-hidden="true"><path d="M12 1 L22 27 L12 20 L2 27 Z" fill="#17212b"/><path d="M12 1 L12 20 L2 27 Z" fill="#ffffff"/></svg>';
+    L.DomEvent.disableClickPropagation(container);
+    return container;
+  }
+});
+map.addControl(new NorthArrowControl());
+L.control.scale({position:'bottomleft',metric:true,imperial:false,maxWidth:160}).addTo(map);
+function positionCalculatorToggle() {
+  // Keep the reopen button directly underneath Leaflet's layer legend/control,
+  // so it never overlaps the legend when the calculator panel is hidden.
+  const button = $('openCalculator');
+  const mapWrap = document.querySelector('.map-wrap');
+  const legend = document.querySelector('.leaflet-control-layers');
+  if (!button || !mapWrap || !legend) return;
+  const mapRect = mapWrap.getBoundingClientRect();
+  const legendRect = legend.getBoundingClientRect();
+  const top = Math.max(10, Math.ceil(legendRect.bottom - mapRect.top + 8));
+  button.style.top = `${top}px`;
+  button.style.right = '10px';
+  button.style.left = 'auto';
+}
+function setCalculatorVisible(visible) {
+  appShell.classList.toggle('calculator-hidden', !visible);
+  $('openCalculator').setAttribute('aria-expanded', visible ? 'true' : 'false');
+  $('hideCalculator').setAttribute('aria-expanded', visible ? 'true' : 'false');
+  // Leaflet must recalculate its canvas after the available map width changes.
+  window.setTimeout(() => {
+    map.invalidateSize({animate:false});
+    positionCalculatorToggle();
+  }, 150);
+}
+$('hideCalculator').addEventListener('click', () => setCalculatorVisible(false));
+$('openCalculator').addEventListener('click', () => setCalculatorVisible(true));
+window.addEventListener('resize', positionCalculatorToggle);
+// Layer-control observers are attached after Leaflet creates the switcher.
+const defaultMapColors = {
+  boundary:'#e53935', floodProne:'#1769ff', waterways:'#00a8d6', roads:'#555555',
+  simulatedFlood:'#1685ff', affectedFields:'#ef5350',
+  crops:{'Rice':'#4caf50','Cassava':'#914624','Corn':'#ffeb3b','Sugarcane':'#934ac3','Fruits':'#f762b9'}
+};
+const mapColors = JSON.parse(JSON.stringify(defaultMapColors));
+const cropColors = mapColors.crops;
+const cropDefaults = {
+  'Rice': {yield_kg_ha:3750, price_baht_kg:12, duration_days:120, damage_factor:0.75},
+  'Cassava': {yield_kg_ha:18750, price_baht_kg:2.5, duration_days:270, damage_factor:0.65},
+  'Corn': {yield_kg_ha:4375, price_baht_kg:9, duration_days:90, damage_factor:0.75},
+  'Sugarcane': {yield_kg_ha:62500, price_baht_kg:1.2, duration_days:365, damage_factor:0.55},
+  'Fruits': {yield_kg_ha:9375, price_baht_kg:20, duration_days:365, damage_factor:0.60}
+};
+const overlayLayers = {};
+let provinceBoundaryLayer = null;
+const layerControl = L.control.layers({}, overlayLayers, {collapsed:true, autoZIndex:false}).addTo(map);
+
+function getLayerControlNamesInDisplayOrder() {
+  const container = layerControl.getContainer();
+  const overlays = container && container.querySelector('.leaflet-control-layers-overlays');
+  if (!overlays) return [];
+  return Array.from(overlays.querySelectorAll('.leaflet-layer-order-row'))
+    .map(row => row.dataset.layerName)
+    .filter(Boolean);
+}
+
+function syncLayerControlOrderControls() {
+  const container = layerControl.getContainer();
+  const overlays = container && container.querySelector('.leaflet-control-layers-overlays');
+  if (!overlays) return;
+
+  // Leaflet rebuilds this list whenever an overlay is registered/removed. Wrap each
+  // native checkbox label in a row and put its ↑/↓ buttons beside the label.
+  const labels = Array.from(overlays.querySelectorAll('label'))
+    .filter(label => label.querySelector('input.leaflet-control-layers-selector'));
+  const rows = [];
+  labels.forEach(label => {
+    const nameSpan = label.querySelector('span');
+    const layerName = (nameSpan ? nameSpan.textContent : label.textContent).trim();
+    if (!layerName) return;
+
+    let row = label.parentElement && label.parentElement.classList.contains('leaflet-layer-order-row')
+      ? label.parentElement : null;
+    if (!row) {
+      row = document.createElement('div');
+      row.className = 'leaflet-layer-order-row';
+      row.dataset.layerName = layerName;
+      overlays.insertBefore(row, label);
+      row.appendChild(label);
+    }
+    row.dataset.layerName = layerName;
+    label.classList.add('leaflet-layer-order-label');
+
+    let buttons = row.querySelector('.leaflet-layer-order-buttons');
+    if (!buttons) {
+      buttons = document.createElement('div');
+      buttons.className = 'leaflet-layer-order-buttons';
+      const up = document.createElement('button');
+      up.type = 'button'; up.className = 'layer-order-up'; up.textContent = '↑';
+      up.title = `Move ${layerName} above the previous layer`;
+      up.setAttribute('aria-label', `Move ${layerName} up`);
+      up.addEventListener('click', event => {
+        event.preventDefault(); event.stopPropagation();
+        moveLayerInOrder(row.dataset.layerName, -1);
+      });
+      const down = document.createElement('button');
+      down.type = 'button'; down.className = 'layer-order-down'; down.textContent = '↓';
+      down.title = `Move ${layerName} below the next layer`;
+      down.setAttribute('aria-label', `Move ${layerName} down`);
+      down.addEventListener('click', event => {
+        event.preventDefault(); event.stopPropagation();
+        moveLayerInOrder(row.dataset.layerName, 1);
+      });
+      buttons.append(up, down);
+      row.appendChild(buttons);
+      L.DomEvent.disableClickPropagation(buttons);
+    }
+    rows.push(row);
+  });
+
+  rows.sort((a, b) => {
+    const ai = layerDrawOrder.indexOf(a.dataset.layerName);
+    const bi = layerDrawOrder.indexOf(b.dataset.layerName);
+    return (ai < 0 ? Number.MAX_SAFE_INTEGER : ai) - (bi < 0 ? Number.MAX_SAFE_INTEGER : bi);
+  });
+  rows.forEach(row => overlays.appendChild(row));
+
+  let reset = overlays.querySelector('.layer-order-reset');
+  if (!reset) {
+    reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'layer-order-reset';
+    reset.textContent = 'Restore default layer order';
+    reset.addEventListener('click', event => {
+      event.preventDefault(); event.stopPropagation(); resetLayerDrawingOrder();
+    });
+    L.DomEvent.disableClickPropagation(reset);
+  }
+  overlays.appendChild(reset);
+
+  const names = rows.map(row => row.dataset.layerName);
+  rows.forEach((row, index) => {
+    const up = row.querySelector('.layer-order-up');
+    const down = row.querySelector('.layer-order-down');
+    if (up) up.disabled = index === 0;
+    if (down) down.disabled = index === rows.length - 1;
+  });
+}
+
+function refreshLayerControlExtras() {
+  // Overlay changes cause Leaflet to recreate its list, so restore only the
+  // ordering buttons. References now live at the bottom of the side calculator panel.
+  syncLayerControlOrderControls();
+}
+
+// Make sure extra controls are restored whenever Leaflet rebuilds the layer switcher.
+const originalLayerControlUpdate = layerControl._update;
+layerControl._update = function() {
+  const result = originalLayerControlUpdate.apply(this, arguments);
+  window.setTimeout(refreshLayerControlExtras, 0);
+  return result;
+};
+refreshLayerControlExtras();
+
+// Keep the reopen-calculator button below the actual layer switcher as it expands/collapses.
+const layerControlElement = layerControl.getContainer();
+if (layerControlElement && 'ResizeObserver' in window) {
+  const layerControlResizeObserver = new ResizeObserver(() => positionCalculatorToggle());
+  layerControlResizeObserver.observe(layerControlElement);
+}
+if (layerControlElement) {
+  layerControlElement.addEventListener('click', () => window.setTimeout(positionCalculatorToggle, 80));
+  layerControlElement.addEventListener('mouseover', () => window.setTimeout(positionCalculatorToggle, 80));
+}
+window.setTimeout(positionCalculatorToggle, 200);
+
+let currentFloodLayer = null;
+let currentAffectedLayer = null;
+let demLayer = null;
+
+const money = n => Number(n || 0).toLocaleString('en-GB',{maximumFractionDigits:0});
+const number = n => Number(n || 0).toLocaleString('en-GB',{maximumFractionDigits:2});
+function setStatus(msg, type='normal') { $('status').textContent=msg; $('status').className='status'+(type==='error'?' error':type==='warning'?' warning':''); }
+async function getJSON(url) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    let detail = '';
+    try { const obj=await response.json(); detail=obj.error || ''; } catch (_) {}
+    throw new Error(detail || `${url} returned HTTP ${response.status}`);
+  }
+  return response.json();
+}
+async function postJSON(url, body) {
+  const response = await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  return result;
+}
+function addOverlay(name, layer, addToMap=true) {
+  if (overlayLayers[name]) {
+    layerControl.removeLayer(overlayLayers[name]);
+    if (map.hasLayer(overlayLayers[name])) map.removeLayer(overlayLayers[name]);
+  }
+  overlayLayers[name]=layer;
+  layerControl.addOverlay(layer,name);
+  if (addToMap) layer.addTo(map);
+  window.setTimeout(refreshLayerControlExtras, 0);
+}
+function setGeoJsonStyle(layer, styleForFeature) {
+  if (!layer) return;
+  layer.eachLayer(child => {
+    if (typeof child.setStyle === 'function') child.setStyle(styleForFeature(child.feature || {}));
+  });
+}
+function refreshMapStyles() {
+  if (overlayLayers['Province boundary']) overlayLayers['Province boundary'].setStyle({color:mapColors.boundary,weight:2,fillOpacity:0});
+  if (overlayLayers['Flood-prone areas']) overlayLayers['Flood-prone areas'].setStyle({color:mapColors.floodProne,fillColor:mapColors.floodProne,weight:1.5,fillOpacity:0.20});
+  if (overlayLayers['Waterways']) overlayLayers['Waterways'].setStyle({color:mapColors.waterways,weight:2,fillOpacity:0.12});
+  if (overlayLayers['Roads']) overlayLayers['Roads'].setStyle({color:mapColors.roads,weight:1.2,fillOpacity:0});
+  setGeoJsonStyle(overlayLayers['Crop fields'], feature => ({color:'#ffffff',weight:0.6,fillColor:mapColors.crops[(feature.properties||{}).crop_type]||'#999999',fillOpacity:0.58}));
+  if (currentFloodLayer) currentFloodLayer.setStyle({color:mapColors.simulatedFlood,weight:1.5,fillColor:mapColors.simulatedFlood,fillOpacity:0.34});
+  if (currentAffectedLayer) currentAffectedLayer.setStyle({color:mapColors.affectedFields,weight:1.5,fillColor:mapColors.affectedFields,fillOpacity:0.68});
+}
+function featurePopup(feature, layer) {
+  const p=feature.properties||{};
+  let html=`<b>${p.name || 'Feature'}</b>`;
+  if (p.crop_type) html+=`<br>Crop: ${p.crop_type}`;
+  if (p.area_m2!=null) html+=`<br>Area: ${number(Number(p.area_m2)/10000)} ha`;
+  if (p.affected_area_rai!=null) {
+    html+=`<br>Affected area: ${number(p.affected_area_rai)} rai`;
+    html+=`<br>Mean flood depth: ${number(p.mean_flood_depth_m)} m`;
+    if(p.flood_duration_days!=null) html+=`<br>Assumed flood duration: ${number(p.flood_duration_days)} days`;
+    html+=`<br>Value at risk: ฿${money(p.value_at_risk_baht)}`;
+    html+=`<br>Estimated loss: ฿${money(p.loss_baht)}`;
+  }
+  layer.bindPopup(html);
+}
+function staticLayer(name, features, style) {
+  if (!features || !features.length) return null;
+  const layer=L.geoJSON(features,{pane:paneForLayer(name),style,onEachFeature:featurePopup});
+  addOverlay(name,layer,true);
+  return layer;
+}
+async function loadMap() {
+  const health=await getJSON('/api/health');
+  const data=await getJSON('/api/layers');
+  let x;
+  // Fit to the provincial boundary alone. Roads, waterways, or individual fields can
+  // extend outside it and should not zoom the opening view away from Nakhon Sawan.
+  provinceBoundaryLayer=staticLayer('Province boundary',data.boundary,{color:mapColors.boundary,weight:2,fillOpacity:0});
+  x=staticLayer('Flood-prone areas',data.flood_prone,{color:mapColors.floodProne,weight:1.5,fillColor:mapColors.floodProne,fillOpacity:0.20});
+  x=staticLayer('Waterways',data.waterways,{color:mapColors.waterways,weight:2,fillOpacity:0.12});
+  x=staticLayer('Roads',data.roads,{color:mapColors.roads,weight:1.2,fillOpacity:0});
+  const fields=await getJSON('/api/fields');
+  x=staticLayer('Crop fields',fields,feature=>({color:'#fff',weight:0.6,fillColor:mapColors.crops[(feature.properties||{}).crop_type]||'#999999',fillOpacity:0.58}));
+  const info=await getJSON('/api/dem-info').catch(()=>({available:false}));
+  if(info.available && info.bounds) {
+    demLayer=L.imageOverlay('/api/dem?palette='+encodeURIComponent($('demPalette').value),info.bounds,{pane:paneForLayer('DEM elevation image'),opacity:Number($('demOpacity').value)/100,interactive:false});
+    addOverlay('DEM elevation image',demLayer,true);
+    const min=Math.floor(info.min_elevation), maxRaw=Math.ceil(info.max_elevation);
+    const max=maxRaw>min ? maxRaw : min+1;
+    // These percentile-derived values are suggested defaults only; users may edit them.
+    $('waterMinLimit').value=min;
+    $('waterMaxLimit').value=max;
+    $('waterLevel').value=min+(max-min)*0.2;
+    applyWaterLevelLimits(false);
+    // Start near the lower end to avoid flooding the entire study area immediately.
+    const startingLevel=min+(max-min)*0.2;
+    $('waterLevel').value=startingLevel;
+    $('levelLabel').textContent=number(startingLevel)+' m';
+  }
+  if(provinceBoundaryLayer) {
+    const provinceBounds=provinceBoundaryLayer.getBounds();
+    if(provinceBounds.isValid()) {
+      map.fitBounds(provinceBounds,{paddingTopLeft:[34,34],paddingBottomRight:[34,34],maxZoom:10});
+    } else {
+      // Fallback centred on Nakhon Sawan if the boundary layer has no valid bounds.
+      map.setView([15.70,100.13],9);
+    }
+  } else {
+    // Boundary data is optional; use a conservative provincial-scale fallback.
+    map.setView([15.70,100.13],9);
+  }
+  if(health.warnings && health.warnings.length) {
+    setStatus(`Loaded ${health.fields_count} retained field features; excluded ${health.excluded_crop_fields||0} Other/unknown-crop fields. ${health.dem_available?'DEM available.':'DEM is unavailable.'} Warnings: ${health.warnings.join(' | ')}`, 'warning');
+  } else {
+    setStatus(`Map loaded: ${health.fields_count} retained crop fields; excluded ${health.excluded_crop_fields||0} Other/unknown-crop fields. DEM ${health.dem_available?'available':'unavailable'}.` ,health.dem_available?'normal':'warning');
+  }
+}
+
+const cropParameters = JSON.parse(JSON.stringify(cropDefaults));
+Object.keys(cropDefaults).forEach(crop=>{
+  const option=document.createElement('option'); option.value=crop; option.textContent=crop; $('crop').appendChild(option);
+});
+function saveCropInputs() {
+  const p=cropParameters[$('crop').value];
+  p.yield_kg_ha=Number($('yield').value); p.price_baht_kg=Number($('price').value);
+  p.duration_days=Number($('duration').value); p.damage_factor=Number($('damage').value);
+}
+function loadCropInputs() {
+  const p=cropParameters[$('crop').value];
+  $('yield').value=p.yield_kg_ha; $('price').value=p.price_baht_kg;
+  $('duration').value=p.duration_days; $('damage').value=p.damage_factor;
+}
+$('crop').addEventListener('change',()=>{saveCropInputs();loadCropInputs();});
+function applyWaterLevelLimits(showMessage=true) {
+  const min=Number($('waterMinLimit').value);
+  const max=Number($('waterMaxLimit').value);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) {
+    setStatus('Water-level limits are invalid: enter finite numbers and make the minimum lower than the maximum.','error');
+    return false;
+  }
+  const slider=$('waterLevel');
+  slider.min=String(min);
+  slider.max=String(max);
+  slider.step=String(Math.min(0.1, max-min));
+  const current=Number(slider.value);
+  if (!Number.isFinite(current) || current < min) slider.value=String(min);
+  else if (current > max) slider.value=String(max);
+  $('levelMin').textContent=number(min)+' m';
+  $('levelMax').textContent=number(max)+' m';
+  $('levelLabel').textContent=number(slider.value)+' m';
+  if (showMessage) setStatus(`Water-level selection range set to ${number(min)}–${number(max)} m. This changes the UI/API limit; it does not create a hydraulic flood model.`);
+  return true;
+}
+$('applyLevelLimits').addEventListener('click',()=>applyWaterLevelLimits(true));
+$('waterLevel').addEventListener('input',()=>{$('levelLabel').textContent=number($('waterLevel').value)+' m';});
+$('shift').addEventListener('input',()=>{
+  const n=Number($('shift').value); $('shiftLabel').textContent=(n>0?'+':'')+n+' days';
+});
+$('scenarioDate').value=new Date().toISOString().slice(0,10);
+loadCropInputs();
+
+function makePayload(shiftDays) {
+  saveCropInputs();
+  const crop=$('crop').value;
+  // Validate stored inputs for every crop, not only the currently selected crop.
+  for (const [cropName,p] of Object.entries(cropParameters)) {
+    if (!Number.isFinite(p.yield_kg_ha)||p.yield_kg_ha<0) throw new Error(`${cropName}: harvest yield (kg/ha) must be zero or greater.`);
+    if (!Number.isFinite(p.price_baht_kg)||p.price_baht_kg<0) throw new Error(`${cropName}: price must be zero or greater.`);
+    if (!Number.isInteger(p.duration_days)||p.duration_days<1) throw new Error(`${cropName}: crop duration must be a positive whole number of days.`);
+    if (!Number.isFinite(p.damage_factor)||p.damage_factor<0||p.damage_factor>1) throw new Error(`${cropName}: damage factor must be between 0 and 1.`);
+  }
+  const days=Number($('daysFlood').value);
+  if (!Number.isInteger(days)||days<0||days>730) throw new Error('Days until flood must be between 0 and 730.');
+  const floodDuration=Number($('floodDurationDays').value);
+  if (!Number.isInteger(floodDuration)||floodDuration<0||floodDuration>365) throw new Error('Flood duration must be an integer between 0 and 365 days.');
+  const refDepth=Number($('fragilityReferenceDepth').value), refDuration=Number($('fragilityReferenceDuration').value);
+  if (!Number.isFinite(refDepth)||refDepth<=0) throw new Error('Reference depth h* must be greater than zero.');
+  if (!Number.isFinite(refDuration)||refDuration<=0) throw new Error('Reference duration d* must be greater than zero.');
+  const levelMin=Number($('waterMinLimit').value), levelMax=Number($('waterMaxLimit').value);
+  if (!Number.isFinite(levelMin)||!Number.isFinite(levelMax)||levelMin>=levelMax) throw new Error('Minimum water level must be lower than maximum water level.');
+  const selectedLevel=Number($('waterLevel').value);
+  if (selectedLevel<levelMin||selectedLevel>levelMax) throw new Error('Click “Apply water-level limits” to update the slider before running the scenario.');
+  return {
+    river_level:selectedLevel,
+    water_level_min:levelMin,
+    water_level_max:levelMax,
+    scenario_date:$('scenarioDate').value,
+    days_until_flood:days,
+    flood_duration_days:floodDuration,
+    fragility_reference_depth_m:refDepth,
+    fragility_reference_duration_days:refDuration,
+    river_connected_only:$('connectedOnly').checked,
+    planting_shifts:{[crop]:Number(shiftDays)},
+    crop_parameters:cropParameters
+  };
+}
+function renderStats(result) {
+  $('affected').textContent=number(result.summary.total_affected_area_rai);
+  $('loss').textContent='฿'+money(result.summary.total_loss_baht);
+  $('risk').textContent='฿'+money(result.summary.total_value_at_risk_baht);
+  const stats=result.stats||{};
+  // Show every crop even when its affected area is zero, so every crop price is editable here.
+  $('stats').innerHTML=Object.keys(cropParameters).map(crop=>{
+    const v=stats[crop]||{};
+    const price=cropParameters[crop].price_baht_kg;
+    return `<tr><td>${crop}</td><td>${number(v.area_affected_rai||0)}</td><td><input class="price-input crop-result-price" data-crop="${crop}" aria-label="${crop} price in baht per kilogram" type="number" min="0" step="any" value="${price}"></td><td>${money(v.loss_baht||0)}</td></tr>`;
+  }).join('');
+}
+$('stats').addEventListener('change',event=>{
+  const input=event.target.closest('.crop-result-price');
+  if (!input) return;
+  const crop=input.dataset.crop, price=Number(input.value);
+  if (!Number.isFinite(price)||price<0) {
+    setStatus(`Enter a valid non-negative price for ${crop}.`,'error');
+    input.value=String(cropParameters[crop].price_baht_kg);
+    return;
+  }
+  cropParameters[crop].price_baht_kg=price;
+  if ($('crop').value===crop) $('price').value=String(price);
+  $('priceStatus').textContent=`${crop} price updated to ฿${number(price)}/kg. Click “Recalculate using crop prices” to update the damage totals.`;
+  setStatus(`Price updated for ${crop}; rerun the scenario to recalculate all values.`,'warning');
+});
+$('recalculatePrices').addEventListener('click',async()=>{
+  setBusy(true);
+  try {
+    const shift=Number($('shift').value);
+    const result=await simulateAtShift(shift,true);
+    $('compareResult').style.display='none';
+    $('priceStatus').textContent='Totals recalculated using the prices shown in this table.';
+    setStatus(`Recalculated scenario using the price for every crop. Total estimated loss: ฿${money(result.summary.total_loss_baht)}.`,'warning');
+  } catch(err) {setStatus(err.message,'error');}
+  finally {setBusy(false);}
+});
+function showScenarioOnMap(result) {
+  if (currentFloodLayer) {layerControl.removeLayer(currentFloodLayer); if(map.hasLayer(currentFloodLayer))map.removeLayer(currentFloodLayer);}
+  if (currentAffectedLayer) {layerControl.removeLayer(currentAffectedLayer); if(map.hasLayer(currentAffectedLayer))map.removeLayer(currentAffectedLayer);}
+  currentFloodLayer=null; currentAffectedLayer=null;
+  if (result.flood_geojson && result.flood_geojson.length) {
+    currentFloodLayer=L.geoJSON(result.flood_geojson,{pane:paneForLayer('Simulated flood extent'),style:{color:mapColors.simulatedFlood,weight:1.5,fillColor:mapColors.simulatedFlood,fillOpacity:.34}});
+    overlayLayers['Simulated flood extent']=currentFloodLayer; layerControl.addOverlay(currentFloodLayer,'Simulated flood extent'); currentFloodLayer.addTo(map);
+  }
+  if (result.fields && result.fields.length) {
+    currentAffectedLayer=L.geoJSON(result.fields,{pane:paneForLayer('Affected crop fields'),style:{color:mapColors.affectedFields,weight:1.5,fillColor:mapColors.affectedFields,fillOpacity:.68},onEachFeature:featurePopup});
+    overlayLayers['Affected crop fields']=currentAffectedLayer; layerControl.addOverlay(currentAffectedLayer,'Affected crop fields'); currentAffectedLayer.addTo(map);
+  }
+  applyLayerDrawingOrder();
+  refreshLayerControlExtras();
+}
+async function simulateAtShift(shift, render=true) {
+  const result=await postJSON('/api/simulate',makePayload(shift));
+  if(render) {renderStats(result);showScenarioOnMap(result);}
+  return result;
+}
+function setBusy(busy) {
+  $('busy').style.display=busy?'block':'none';
+  $('runButton').disabled=busy; $('compareButton').disabled=busy;
+}
+$('runButton').addEventListener('click',async()=>{
+  setBusy(true);
+  try {
+    $('compareResult').style.display='none';
+    const shift=Number($('shift').value);
+    const result=await simulateAtShift(shift,true);
+    const extra=result.summary.connectivity_note?(' '+result.summary.connectivity_note):'';
+    setStatus(`Scenario complete. Flood date: ${result.summary.flood_date}. ${result.summary.model_note}${extra}`,'warning');
+  } catch(err) {setStatus(err.message,'error');}
+  finally {setBusy(false);}
+});
+$('compareButton').addEventListener('click',async()=>{
+  setBusy(true);
+  try {
+    const shift=Number($('shift').value);
+    if(shift===0) throw new Error('Move the planting slider away from 0 days to compare against the original planting date.');
+    const baseline=await simulateAtShift(0,false);
+    const shifted=await simulateAtShift(shift,true);
+    const delta=baseline.summary.total_loss_baht-shifted.summary.total_loss_baht;
+    let wording;
+    if(Math.abs(delta)<0.005) wording='Estimated loss is unchanged.';
+    else if(baseline.summary.total_loss_baht<=0) wording=`The original scenario has zero estimated loss; shifted-scenario loss is ฿${money(shifted.summary.total_loss_baht)}, so percentage change is not meaningful.`;
+    else if(delta>0) wording=`Estimated loss falls by ฿${money(delta)} (${number(delta/baseline.summary.total_loss_baht*100)}% of baseline loss).`;
+    else wording=`Estimated loss rises by ฿${money(-delta)} (${number((-delta)/baseline.summary.total_loss_baht*100)}% of baseline loss).`;
+    $('compareResult').style.display='block';
+    $('compareResult').innerHTML=`<strong>Planting-date comparison</strong><br>Original loss: <b>฿${money(baseline.summary.total_loss_baht)}</b><br>Shifted loss (${shift>0?'+':''}${shift} days): <b>฿${money(shifted.summary.total_loss_baht)}</b><br>${wording}<div class="small-note">This is a comparison of the assumptions in this prototype, not a measured yield forecast.</div>`;
+    setStatus(`Compared the original planting date with a ${shift>0?'later':'earlier'} planting date. The map displays the shifted scenario.`,'warning');
+  } catch(err) {setStatus(err.message,'error');}
+  finally {setBusy(false);}
+});
+
+const colorInputBindings = [
+  ['colorBoundary', value=>{mapColors.boundary=value;}],
+  ['colorFloodProne', value=>{mapColors.floodProne=value;}],
+  ['colorWaterways', value=>{mapColors.waterways=value;}],
+  ['colorRoads', value=>{mapColors.roads=value;}],
+  ['colorSimulatedFlood', value=>{mapColors.simulatedFlood=value;}],
+  ['colorAffectedFields', value=>{mapColors.affectedFields=value;}],
+  ['colorRice', value=>{mapColors.crops.Rice=value;}],
+  ['colorCassava', value=>{mapColors.crops.Cassava=value;}],
+  ['colorCorn', value=>{mapColors.crops.Corn=value;}],
+  ['colorSugarcane', value=>{mapColors.crops.Sugarcane=value;}],
+  ['colorFruits', value=>{mapColors.crops.Fruits=value;}]
+];
+colorInputBindings.forEach(([id,update])=>$(id).addEventListener('input',event=>{
+  update(event.target.value);
+  refreshMapStyles();
+}));
+$('demPalette').addEventListener('change',()=>{
+  if (demLayer) demLayer.setUrl('/api/dem?palette='+encodeURIComponent($('demPalette').value)+'&v='+Date.now());
+});
+$('demOpacity').addEventListener('input',()=>{
+  const value=Number($('demOpacity').value);
+  $('demOpacityLabel').textContent=value+'%';
+  if (demLayer) demLayer.setOpacity(value/100);
+});
+$('resetMapStyle').addEventListener('click',()=>{
+  Object.assign(mapColors,JSON.parse(JSON.stringify(defaultMapColors)));
+  const bindings={colorBoundary:mapColors.boundary,colorFloodProne:mapColors.floodProne,colorWaterways:mapColors.waterways,colorRoads:mapColors.roads,colorSimulatedFlood:mapColors.simulatedFlood,colorAffectedFields:mapColors.affectedFields,colorRice:mapColors.crops.Rice,colorCassava:mapColors.crops.Cassava,colorCorn:mapColors.crops.Corn,colorSugarcane:mapColors.crops.Sugarcane,colorFruits:mapColors.crops.Fruits};
+  Object.entries(bindings).forEach(([id,value])=>$(id).value=value);
+  $('demPalette').value='terrain';
+  $('demOpacity').value='45'; $('demOpacityLabel').textContent='45%';
+  if(demLayer){demLayer.setUrl('/api/dem?palette=terrain&v='+Date.now());demLayer.setOpacity(.45);}
+  refreshMapStyles();
+});
+
+loadMap().then(()=>{refreshMapStyles();positionCalculatorToggle();}).catch(err=>setStatus('Map loading error: '+err.message+' Check the Flask terminal and data file names.','error'));
+</script>
+</body>
+</html>

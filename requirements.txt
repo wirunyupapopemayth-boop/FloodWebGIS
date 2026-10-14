@@ -1,0 +1,8 @@
+Flask
+gunicorn
+numpy
+geopandas
+rasterio
+Pillow
+shapely
+scipy

@@ -1,0 +1,7 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+nsn_dem3.tif
+data2 (1)/
