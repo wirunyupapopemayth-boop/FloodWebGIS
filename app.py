@@ -2,6 +2,7 @@ from flask import Flask, render_template, jsonify, send_file, request
 import os
 import io
 import json
+import heapq
 from datetime import date, timedelta
 
 import numpy as np
@@ -13,6 +14,8 @@ from affine import Affine
 from PIL import Image
 from shapely.geometry import mapping, shape
 from shapely.ops import unary_union
+from rasterio.windows import Window, transform as window_transform, bounds as window_bounds
+from shapely.geometry import box
 
 app = Flask(__name__)
 
@@ -37,6 +40,7 @@ LOAD_FLOOD_PRONE_LAYER = False
 EXCLUDE_OTHER_CROPS = True
 DISPLAY_SIMPLIFY_TOLERANCE = 0.0001  # WGS84 degrees; display only, analysis uses original geometry.
 MAX_FLOOD_DISPLAY_DIMENSION = 900   # simplify flood outline generation for browser display.
+MAX_AFFECTED_FEATURES = 500  # cap map geometry returned by /api/simulate; stats still use all fields.
 
 UTM_CRS = "EPSG:32647"
 WGS_CRS = "EPSG:4326"
@@ -165,6 +169,7 @@ def load_dem():
                 return
             masked_dem = src.read(1, masked=True).astype(np.float32)
             dem_data = masked_dem.filled(np.nan)
+            del masked_dem  # avoid keeping a second full-size DEM array during startup
             dem_transform = src.transform
             dem_crs = src.crs
 
@@ -371,14 +376,21 @@ def get_dem_info():
     height, width = dem_data.shape
     left, bottom, right, top = rasterio.transform.array_bounds(height, width, dem_transform)
     bounds = transform_bounds(dem_crs, WGS_CRS, left, bottom, right, top, densify_pts=21)
-    valid = dem_data[np.isfinite(dem_data)]
-    if not valid.size:
+    # Sample at most about one million cells for display slider statistics.
+    # This avoids making a full-sized boolean mask and copying every valid DEM cell.
+    row_step = max(1, int(np.ceil(height / 1000)))
+    col_step = max(1, int(np.ceil(width / 1000)))
+    sample = dem_data[::row_step, ::col_step]
+    valid_sample = sample[np.isfinite(sample)]
+    if not valid_sample.size:
         return jsonify({"available": False, "error": "DEM has no valid pixels"}), 404
+    min_elevation, max_elevation = np.percentile(valid_sample, [2, 98])
     return jsonify({
         "available": True,
         "bounds": [[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
-        "min_elevation": float(np.nanpercentile(valid, 2)),
-        "max_elevation": float(np.nanpercentile(valid, 98)),
+        "min_elevation": float(min_elevation),
+        "max_elevation": float(max_elevation),
+        "elevation_statistics_sampled": True,
         "vertical_units": "Use the same vertical units/datum as the DEM; normally metres."
     })
 
@@ -388,25 +400,35 @@ def get_dem_info():
 # This is a simple elevation-threshold ('bathtub') scenario, not a hydraulic model.
 # =====================================================
 def create_flood_mask(water_level, connected_only=False):
+    # Build the threshold mask in-place to reduce temporary arrays on low-RAM hosts.
     valid = np.isfinite(dem_data)
-    low_cells = valid & (dem_data <= water_level)
+    low_cells = np.empty(dem_data.shape, dtype=bool)
+    np.less_equal(dem_data, water_level, out=low_cells)
+    np.logical_and(low_cells, valid, out=low_cells)
+    del valid
+
     if not connected_only or datasets.get("waterways") is None:
         return low_cells
     try:
         from scipy import ndimage
         water = datasets["waterways"].to_crs(dem_crs)
-        seeds = rasterize(
+        seed_raster = rasterize(
             [(geom, 1) for geom in water.geometry if geom is not None and not geom.is_empty],
             out_shape=dem_data.shape, transform=dem_transform, fill=0,
             all_touched=True, dtype="uint8"
-        ).astype(bool)
+        )
+        # Rasterize only writes 0/1, so view as bool without allocating a second raster.
+        seeds = seed_raster.view(np.bool_)
         seeds &= low_cells
         if not seeds.any():
             print("WARNING: no low waterway seed pixels; using elevation-threshold mask.")
+            del seed_raster, seeds
             return low_cells
-        return ndimage.binary_propagation(
+        connected = ndimage.binary_propagation(
             seeds, structure=np.ones((3, 3), dtype=bool), mask=low_cells
         )
+        del seed_raster, seeds, low_cells
+        return connected
     except ImportError:
         print("WARNING: scipy not installed; using elevation-threshold mask.")
         return low_cells
@@ -481,7 +503,7 @@ def get_crop_parameters(payload, crop):
 
 def simulate_flood(payload):
     if dem_data is None:
-        raise ValueError("DEM is unavailable. Check nsn_dem3.tif and its CRS.")
+        raise ValueError(f"DEM is unavailable. Check {os.path.basename(DEM_FILE)} and its CRS.")
     if fields_utm is None or fields_web is None:
         raise ValueError("Crop fields are unavailable. Check Fields.shp and its sidecar files.")
 
@@ -520,122 +542,142 @@ def simulate_flood(payload):
             or not np.isfinite(fragility_reference_duration_days) or fragility_reference_duration_days <= 0):
         raise ValueError("Fragility reference depth and duration must be finite values greater than zero")
 
-    flood_mask = create_flood_mask(water_level, connected_only=connected_only)
-    valid_dem = np.isfinite(dem_data)
+    # Calculate using small raster windows to reduce peak memory.
+    flood_mask = create_flood_mask(
+        water_level, connected_only=connected_only
+    )
+    flooded_pixel_count = int(flood_mask.sum())
 
-    # Rasterize all field polygons once. Field polygons are assumed to be non-overlapping.
-        # Rasterize all fields once using a compact integer raster.
     fields_dem = (
         fields_utm
         if fields_utm.crs == dem_crs
         else fields_utm.to_crs(dem_crs)
     )
 
-    raster_shapes = []
-    row_by_code = {}
+    n_fields = len(fields_dem)
 
-    for code, (idx, row) in enumerate(fields_dem.iterrows(), start=1):
-        geom = row.geometry
-        if geom is None or geom.is_empty:
-            continue
-        raster_shapes.append((geom, code))
-        row_by_code[code] = idx
+    if n_fields == 0:
+        raise ValueError("No valid crop fields available")
 
-    if not raster_shapes:
-        raise ValueError("No valid field polygons could be rasterized")
+    # uint16 is sufficient for 25,521 field IDs.
+    if n_fields > np.iinfo(np.uint16).max:
+        raise ValueError("Too many fields for uint16 raster labels")
 
-    max_code = max(row_by_code)
-    if max_code > np.iinfo(np.uint16).max:
-        raise ValueError("Too many fields for compact raster labels")
+    n_codes = n_fields + 1
+    row_by_code = {
+        pos + 1: idx
+        for pos, idx in enumerate(fields_dem.index)
+    }
 
-    num_codes = max_code + 1
-
-    labels = rasterize(
-        raster_shapes,
-        out_shape=dem_data.shape,
-        transform=dem_transform,
-        fill=0,
-        all_touched=False,
-        dtype="uint16"
-    )
-
-    # Accumulate statistics in row blocks to avoid large temporary arrays.
-    total_counts = np.zeros(num_codes, dtype=np.int64)
-    flooded_counts = np.zeros(num_codes, dtype=np.int64)
-    depth_sum = np.zeros(num_codes, dtype=np.float64)
-    fragility_basis_sum = np.zeros(num_codes, dtype=np.float64)
+    total_counts = np.zeros(n_codes, dtype=np.int64)
+    flooded_counts = np.zeros(n_codes, dtype=np.int64)
+    depth_sum = np.zeros(n_codes, dtype=np.float64)
+    fragility_basis_sum = np.zeros(n_codes, dtype=np.float64)
 
     duration_response = min(
         1.0,
         flood_duration_days / fragility_reference_duration_days
     )
 
-    block_rows = 256
+    height, width = dem_data.shape
+    fields_sindex = fields_dem.sindex
+    block_rows = 128
 
-    for y0 in range(0, dem_data.shape[0], block_rows):
-        y1 = min(y0 + block_rows, dem_data.shape[0])
+    for y0 in range(0, height, block_rows):
+        y1 = min(y0 + block_rows, height)
 
-        dem_block = dem_data[y0:y1, :]
-        labels_block = labels[y0:y1, :]
-        valid_block = np.isfinite(dem_block)
+        window = Window(0, y0, width, y1 - y0)
+        block_dem = dem_data[y0:y1, :]
+        valid_block = np.isfinite(block_dem)
 
-        if valid_block.any():
-            valid_codes = labels_block[valid_block].astype(
-                np.int32, copy=False
+        # Only rasterize fields intersecting this block.
+        block_geom = box(*window_bounds(window, dem_transform))
+        positions = fields_sindex.query(
+            block_geom, predicate="intersects"
+        )
+        positions = np.sort(
+            np.asarray(positions, dtype=np.int64)
+        )
+
+        shapes_for_block = []
+        for pos in positions:
+            geom = fields_dem.geometry.iloc[int(pos)]
+            if geom is not None and not geom.is_empty:
+                shapes_for_block.append((geom, int(pos) + 1))
+
+        if shapes_for_block:
+            labels = rasterize(
+                shapes_for_block,
+                out_shape=(y1 - y0, width),
+                transform=window_transform(window, dem_transform),
+                fill=0,
+                all_touched=False,
+                dtype="uint16"
             )
+        else:
+            labels = np.zeros(
+                (y1 - y0, width), dtype=np.uint16
+            )
+
+        valid_codes = labels[valid_block]
+        if valid_codes.size:
             total_counts += np.bincount(
-                valid_codes, minlength=num_codes
+                valid_codes, minlength=n_codes
             )
+        del valid_codes
 
         flooded_block = (
-            valid_block
-            & flood_mask[y0:y1, :]
-            & (labels_block > 0)
+            flood_mask[y0:y1, :]
+            & valid_block
+            & (labels > 0)
         )
 
-        if not flooded_block.any():
-            continue
+        if flooded_block.any():
+            flood_codes = labels[flooded_block]
+            flooded_counts += np.bincount(
+                flood_codes, minlength=n_codes
+            )
 
-        flooded_codes = labels_block[flooded_block].astype(
-            np.int32, copy=False
-        )
+            depths = np.maximum(
+                0.0,
+                water_level - block_dem[flooded_block]
+            ).astype(np.float32, copy=False)
 
-        flooded_counts += np.bincount(
-            flooded_codes, minlength=num_codes
-        )
+            depth_sum += np.bincount(
+                flood_codes,
+                weights=depths,
+                minlength=n_codes
+            )
 
-        depth_values = np.maximum(
-            0.0,
-            water_level - dem_block[flooded_block]
-        ).astype(np.float32, copy=False)
+            depth_response = np.clip(
+                depths / fragility_reference_depth_m,
+                0.0,
+                1.0
+            )
+            fragility_basis = (
+                depth_response * duration_response
+            )
 
-        depth_sum += np.bincount(
-            flooded_codes,
-            weights=depth_values,
-            minlength=num_codes
-        )
+            fragility_basis_sum += np.bincount(
+                flood_codes,
+                weights=fragility_basis,
+                minlength=n_codes
+            )
 
-        depth_response = np.clip(
-            depth_values / fragility_reference_depth_m,
-            0.0,
-            1.0
-        )
+            del flood_codes, depths
+            del depth_response, fragility_basis
 
-        fragility_basis = depth_response * duration_response
-
-        fragility_basis_sum += np.bincount(
-            flooded_codes,
-            weights=fragility_basis,
-            minlength=num_codes
-        )
-
-    # Free the large label raster before building the response.
-    del labels
+        del labels, block_dem, valid_block, flooded_block
+    # The flood mask is not needed after the raster-block pass. Release it before
+    # generating response geometries to lower peak memory on Render Free.
+    del flood_mask
 
     stats = {crop: {"area_total_rai": 0.0, "area_affected_rai": 0.0,
                     "value_at_risk_baht": 0.0, "loss_baht": 0.0,
                     "fields_affected": 0} for crop in CROP_TYPES}
-    affected_features = []
+    # Keep only the 500 largest affected fields for display. Calculate totals for
+    # all fields; store only scalar properties until the final response is built.
+    field_candidates = []
     connected_note = ""
 
     for code, idx in row_by_code.items():
@@ -689,23 +731,43 @@ def simulate_flood(payload):
         stats[crop]["loss_baht"] += estimated_loss
         stats[crop]["fields_affected"] += 1
 
-        web_row = fields_web.loc[idx]
+        feature_properties = {
+            "name": str(fields_web.loc[idx].get("name", f"Field_{idx}")),
+            "Crop_type": crop,
+            "area_rai": round(total_area_rai, 3),
+            "affected_area_rai": round(affected_area_rai, 3),
+            "flood_fraction": round(fraction, 4),
+            "mean_flood_depth_m": round(mean_depth, 2),
+            "flood_duration_days": flood_duration_days,
+            "crop_age_at_flood_days": crop_age,
+            "crop_present_at_flood": bool(crop_present),
+            "weighted_fragility_area_ha": round(weighted_fragility_area_ha, 5),
+            "vulnerability": round(vulnerability, 3),
+            "value_at_risk_baht": round(value_at_risk, 2),
+            "loss_baht": round(estimated_loss, 2)
+        }
+        candidate = (float(affected_area_rai), int(code), idx, feature_properties)
+        if len(field_candidates) < MAX_AFFECTED_FEATURES:
+            heapq.heappush(field_candidates, candidate)
+        elif candidate[:2] > field_candidates[0][:2]:
+            heapq.heapreplace(field_candidates, candidate)
+
+    # Only simplify/serialize geometries for selected display features. Totals above
+    # still include every affected field, not just the displayed 500 polygons.
+    affected_features = []
+    for _, _, idx, props in sorted(field_candidates, key=lambda item: (item[0], item[1]), reverse=True):
+        web_geom = fields_web.loc[idx].geometry
+        if web_geom is None or web_geom.is_empty:
+            continue
+        display_geom = web_geom.simplify(
+            DISPLAY_SIMPLIFY_TOLERANCE, preserve_topology=True
+        )
+        if display_geom.is_empty:
+            continue
         affected_features.append({
-            "type": "Feature", "geometry": mapping(web_row.geometry),
-            "properties": {
-                "name": str(web_row.get("name", f"Field_{idx}")), "Crop_type": crop,
-                "area_rai": round(total_area_rai, 3),
-                "affected_area_rai": round(affected_area_rai, 3),
-                "flood_fraction": round(fraction, 4),
-                "mean_flood_depth_m": round(mean_depth, 2),
-                "flood_duration_days": flood_duration_days,
-                "crop_age_at_flood_days": crop_age,
-                "crop_present_at_flood": bool(crop_present),
-                "weighted_fragility_area_ha": round(weighted_fragility_area_ha, 5),
-                "vulnerability": round(vulnerability, 3),
-                "value_at_risk_baht": round(value_at_risk, 2),
-                "loss_baht": round(estimated_loss, 2)
-            }
+            "type": "Feature",
+            "geometry": mapping(display_geom),
+            "properties": props
         })
 
     for crop_stats in stats.values():
@@ -729,8 +791,11 @@ def simulate_flood(payload):
             "total_affected_area_rai": round(sum(s["area_affected_rai"] for s in stats.values()), 2),
             "total_loss_baht": round(sum(s["loss_baht"] for s in stats.values()), 2),
             "total_value_at_risk_baht": round(sum(s["value_at_risk_baht"] for s in stats.values()), 2),
-            "flooded_pixel_count": int(flood_mask.sum()),
-            "model_note": "Simple DEM elevation-threshold screening model; damage uses a provisional depth-duration fragility function and is not a calibrated hydraulic/agricultural forecast.",
+            "flooded_pixel_count": flooded_pixel_count,
+            "affected_fields_total": int(sum(v["fields_affected"] for v in stats.values())),
+            "affected_field_features_returned": len(affected_features),
+            "affected_field_features_limit": MAX_AFFECTED_FEATURES,
+            "model_note": "Simple DEM elevation-threshold screening model; damage uses a provisional depth-duration fragility function and is not a calibrated hydraulic/agricultural forecast. Statistics include all affected fields; the map displays up to 500 affected polygons, prioritised by affected area.",
             "connectivity_note": connected_note
         }
     }
@@ -739,7 +804,9 @@ def simulate_flood(payload):
 @app.route("/api/simulate", methods=["POST"])
 def api_simulate():
     try:
-        payload = request.get_json(silent=True) or {}
+        payload = request.get_json(silent=True)
+        if payload is None:
+            return jsonify({"error": "Request body must be valid JSON"}), 400
         return jsonify(simulate_flood(payload))
     except (ValueError, TypeError, OverflowError) as exc:
         return jsonify({"error": str(exc)}), 400
